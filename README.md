@@ -411,7 +411,7 @@ flowchart TD
     Start -->|"trigger_apm02_deployment"| W1
     W1 --> WaitWin
     W2 -.->|"adjust_apm02_wait"| WaitWin
-    WaitWin -->|"Timer Expired or @Jarvis deploy now"| MergeT
+    WaitWin -->|"Timer Expired<br/>OR @Jarvis deploy now"| MergeT
     MergeT --> SAP
     SAP -->|"sap_cicd_finished"| W3
     W3 --> Alert
@@ -460,3 +460,4 @@ flowchart TD
     PathApproval -->|"Reviewer approves"| TenantBuild
     TenantBuild --> TeamsNotif
 ```
+
