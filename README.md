@@ -1,8 +1,8 @@
 ﻿# 🚀 AsInt Deployment Automation & Workflows Repository
 
-Welcome to the central repository for **AsInt Deployment Automation Workflows, Tenant Callers, and Automation Scripts** extracted directly from `StillSomehowSane/asint_ais`.
+Welcome to the central repository for **AsInt Deployment Automation Workflows & Tenant Callers** extracted directly from `StillSomehowSane/asint_ais`.
 
-This repository serves as a dedicated, organized reference for engineering leadership, developers, and DevOps teams to review, analyze, and optimize our CI/CD pipelines.
+This repository serves as a dedicated, clean reference strictly for **deployment-related workflows** to help engineering leadership, developers, and DevOps teams review, understand, and optimize our deployment pipelines.
 
 ---
 
@@ -10,27 +10,22 @@ This repository serves as a dedicated, organized reference for engineering leade
 
 ```text
 ├── .github/
-│   ├── workflows/             # 61 Workflow Definitions (Core Pipelines & All Tenant Deployers)
-│   │   ├── apm02_*.yml        # APM-02 Deployment Lifecycle (Steps 1 to 6)
-│   │   ├── _auto_merge*.yml   # Autonomous Auto-Merge & Governance Engine
-│   │   ├── deploy_*.yml       # Tenant Deployment Caller Workflows (All Environments)
-│   │   └── ...                # Auxiliary & Testing Workflows
-│   └── scripts/               # 16 Shell & Node.js Deployment & Health Scripts
-│       ├── notify_*.sh        # Microsoft Teams Adaptive Card Notification Scripts
-│       ├── ui-*.js            # QUnit & Code Coverage Verification Scripts
-│       └── ...
+│   └── workflows/             # Pure Deployment Workflows & All Tenant Callers
+│       ├── apm02_*.yml        # APM-02 Deployment Lifecycle (Steps 1 to 6)
+│       ├── _auto_merge*.yml   # Autonomous Auto-Merge & Governance Engine
+│       └── deploy_*.yml       # Tenant Deployment Caller Workflows (All Environments)
 └── docs/
     └── WORKFLOW_INVENTORY_DOCUMENT.md   # Complete Analysis Document (What, When, Why, Optimization)
 ```
 
 ---
 
-## 🏛️ Pipeline Architecture & Workflow Classification
+## 🏛️ Deployment Workflow Classification
 
-The workflows in this repository are categorized into 4 distinct functional groups:
+The workflows in this repository are categorized into 3 distinct functional groups:
 
 ### 1. 🎯 APM-02 Deployment Family (Workflows 1 to 6)
-Orchestrates the scheduled snapshot creation, countdown testing window, automated merge, and SAP content channel refresh:
+Orchestrates scheduled snapshot creation, countdown testing window, automated merge, and SAP content channel refresh:
 * [`apm02_1_create_and_wait.yml`](.github/workflows/apm02_1_create_and_wait.yml) — Initiates snapshot branch, notifies Microsoft Teams, runs 30m cherry-pick wait.
 * [`apm02_2_extend_wait.yml`](.github/workflows/apm02_2_extend_wait.yml) — Dynamically extends the wait window if testing requires more time.
 * [`apm02_3_finalize_cycle.yml`](.github/workflows/apm02_3_finalize_cycle.yml) — Merges snapshot to tenant branch, runs headless Playwright BWZ refresh, and finalizes cycle.
@@ -67,7 +62,7 @@ Dedicated trigger workflows per tenant environment supporting Core, Data Collect
 
 ---
 
-### 4. 🛠️ Notifications, Webhooks & Auxiliary
+## 🛠️ Helpers & Integration
 * [`_apm02_notify.yml`](.github/workflows/_apm02_notify.yml) — Reusable Teams Adaptive Card dispatcher.
 * [`sap_cicd_notifier.yml`](.github/workflows/sap_cicd_notifier.yml) — SAP Continuous Integration & Delivery (ANS) webhook receiver.
 * [`_cf_app_control.yml`](.github/workflows/_cf_app_control.yml) — Cloud Foundry approuter start/stop lifecycle manager.
