@@ -267,7 +267,6 @@ This document lists all deployment workflows in the repository. For each workflo
   on:
     repository_dispatch:
       types: [sap_cicd_started, sap_cicd_finished]
-    workflow_dispatch:
   ```
 * **Steps performed:**
   1. Validates incoming SAP CI/CD webhook event payload.
@@ -378,37 +377,61 @@ This document lists all deployment workflows in the repository. For each workflo
 
 ```mermaid
 flowchart TD
-    subgraph Trigger["1. Deployment Request"]
-        A["@Jarvis share snapshot (ChatOps in Teams)"]
-        A2["@Jarvis deploy <tenant> (e.g. deploy ais-02)"]
+    classDef trigger fill:#4f46e5,stroke:#818cf8,stroke-width:2px,color:#fff;
+    classDef process fill:#0369a1,stroke:#38bdf8,stroke-width:2px,color:#fff;
+    classDef wait fill:#b45309,stroke:#fbbf24,stroke-width:2px,color:#fff;
+    classDef success fill:#047857,stroke:#34d399,stroke-width:2px,color:#fff;
+    classDef notify fill:#6b21a8,stroke:#c084fc,stroke-width:2px,color:#fff;
+    classDef monitor fill:#be123c,stroke:#fb7185,stroke-width:2px,color:#fff;
+
+    %% 1. TRIGGERS
+    Cmd1["💬 @Jarvis share snapshot"]:::trigger
+    Cmd2["💬 @Jarvis deploy tenant"]:::trigger
+
+    %% 2. APM-02 PIPELINE
+    subgraph FlowA["📦 APM-02 Release Lifecycle"]
+        W1["1️⃣ apm02_1_create_and_wait.yml<br/>• Creates snapshot from main<br/>• Opens tracking PRs"]:::process
+        WWait["⏳ 30-Min Cherry-Pick Window<br/>(Devs cherry-pick hotfixes)"]:::wait
+        W2["2️⃣ apm02_2_extend_wait.yml<br/>(Optional: Adjust timer)"]:::wait
+        WMergeT["🔀 Auto-Merge Snapshot<br/>into Tenant Branch"]:::process
+        WSAP["⚙️ SAP CI/CD Build Runs<br/>(Cloud Foundry deploy)"]:::process
+        W3["3️⃣ apm02_3_finalize_cycle.yml<br/>• Merges snapshot back to main<br/>• Deletes snapshot branch"]:::success
     end
 
-    subgraph APM02_Cycle["2. APM-02 Deployment Flow"]
-        A -->|"trigger_apm02_deployment"| B["apm02_1_create_and_wait.yml"]
-        B -->|"Creates Snapshot from"| Main["Base Branch (main / main-dc / main-dc-addin)"]
-        B -->|"30-min Countdown Wait"| Wait["Wait Window (Cherry-Picks by Devs)"]
-        Ext["apm02_2_extend_wait.yml"] -.->|"Optional: adjust_apm02_wait"| Wait
-        Wait -->|"Countdown Finished / Deploy Now"| MergeTenant["Merge Snapshot into Tenant Branch"]
-        MergeTenant --> SAP["SAP CI/CD Build (Cloud Foundry)"]
-        SAP -->|"sap_cicd_finished"| Fin["apm02_3_finalize_cycle.yml"]
-        Fin -->|"Sync Back to"| Main
-        Fin -->|"Delete"| Del["Delete Snapshot Branch"]
+    %% 3. TENANT AUTO-MERGE PIPELINE
+    subgraph FlowB["⚡ Tenant Auto-Merge Deployments (AIS-02, APM-01, Baystar, etc.)"]
+        WCall["4️⃣ deploy_tenant.yml<br/>(Core / DC / DC-AddIn)"]:::process
+        WAuto["5️⃣ _auto_merge.yml<br/>(Evaluates PR mergeability)"]:::process
+        WClean["✅ Zero Conflicts<br/>Direct Merge into Tenant"]:::success
+        WResolve["🔧 Has Conflicts<br/>auto_merge_conflict_resolver.yml<br/>(Auto-merges once dev pushes fix)"]:::monitor
+        WApprove["🛡️ Protected Branch<br/>auto_merge_approval_handler.yml<br/>(Auto-merges upon senior review)"]:::wait
     end
 
-    subgraph AutoMerge_Flow["3. Auto-Merge Pipeline (Tenant Deployments)"]
-        A2 -->|"trigger_<tenant>_deployment"| Caller["deploy_<tenant>.yml (e.g. deploy_ais02_dc.yml)"]
-        Caller -->|"calls with dev & tenant branch"| AutoMerge["_auto_merge.yml"]
-        AutoMerge -->|"If zero conflicts"| DirectMerge["Direct Merge into Tenant Branch"]
-        AutoMerge -->|"If conflicts exist"| Resolver["auto_merge_conflict_resolver.yml (Resumes after dev pushes fix)"]
-        AutoMerge -->|"If protected branch"| Approval["auto_merge_approval_handler.yml (Merges upon review approval)"]
+    %% 4. MONITORS & ALERTS
+    subgraph FlowC["📢 Monitoring & Teams Alerts"]
+        WMon["6️⃣ Conflict Monitors<br/>apm02_4 (Base) & apm02_5 (Tenant)"]:::monitor
+        WNotif["🔔 _apm02_notify.yml<br/>(Posts Adaptive Cards to Teams)"]:::notify
     end
 
-    subgraph Monitoring["4. Conflict Monitoring & Alerts"]
-        Mon1["apm02_4_conflict_monitor.yml (Base PRs)"]
-        Mon2["apm02_5_apm02_conflict_monitor.yml (Tenant PRs)"]
-        Mon1 & Mon2 -->|"Alerts on Conflict"| Notify["_apm02_notify.yml (Teams Card)"]
-        Fin -->|"Deployment Success Card"| Notify
-    end
+    %% CONNECTORS (APM-02)
+    Cmd1 -->|"trigger_apm02_deployment"| W1
+    W1 --> WWait
+    W2 -.->|"adjust_apm02_wait"| WWait
+    WWait -->|"Timer Finished / Deploy Now"| WMergeT
+    WMergeT --> WSAP
+    WSAP -->|"sap_cicd_finished"| W3
+    W3 --> WNotif
+
+    %% CONNECTORS (Tenant Auto-Merge)
+    Cmd2 -->|"trigger_tenant_deployment"| WCall
+    WCall --> WAuto
+    WAuto -->|"No Conflicts"| WClean
+    WAuto -->|"Conflicts Detected"| WResolve
+    WAuto -->|"Requires Approval"| WApprove
+    WClean & WResolve & WApprove -->|"Kicks off build"| WSAP
+
+    %% CONNECTORS (Monitors)
+    WMon -->|"Alert on Conflicts"| WNotif
 ```
 
 
