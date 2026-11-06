@@ -140,7 +140,7 @@ This document lists all deployment workflows in the repository. For each workflo
 
 ### 7. [_auto_merge.yml](.github/workflows/_auto_merge.yml)
 * **What does it do?**  
-  Reusable core auto-merge engine called by tenant deployment workflows (e.g. merging `dev` into `tenant/asint-ais-02`). Checks for clean merge state, handles optional Cloud Foundry app stopping during database changes, and automatically merges the PR without manual button clicks.
+  Reusable core auto-merge engine called by tenant deployment workflows (e.g. merging `dev` into `tenant/asint-ais-02`). Checks for clean merge state, handles optional Cloud Foundry app stopping during deployments to avoid space/organization memory limits being exceeded, and automatically merges the PR without manual button clicks.
 * **When is it triggered?**
   ```yaml
   on:
@@ -277,7 +277,7 @@ This document lists all deployment workflows in the repository. For each workflo
 
 ### 12. [_cf_app_control.yml](.github/workflows/_cf_app_control.yml)
 * **What does it do?**  
-  Controls Cloud Foundry application states (stops, starts, or checks status of apps/approuters) during deployments to avoid database lockups.
+  Controls Cloud Foundry application states (stops, starts, or checks status of apps/approuters) during deployments to avoid Cloud Foundry space memory or organization memory limits from being exceeded.
 * **When is it triggered?**
   ```yaml
   on:
@@ -373,3 +373,5 @@ flowchart TD
         Fin -->|"Deployment Success Card"| Notify
     end
 ```
+
+
