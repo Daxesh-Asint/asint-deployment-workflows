@@ -308,13 +308,12 @@ This document lists all deployment workflows in the repository. For each workflo
 ## Section 4: Tenant Deployment Callers (42 Workflows)
 
 * **What do they do?**  
-  Each workflow triggers deployment for a specific tenant and module (Core, Data Collector, or Add-In). It calls `_auto_merge.yml` with its designated **Compare Branch** (e.g. `main`, `dev`, or a QA branch) and **Target Tenant Branch** to automatically merge updates and trigger the SAP CI/CD build.
+  Each workflow triggers deployment for a specific tenant and module (Core, Data Conduit, or Add-In). It calls `_auto_merge.yml` with its designated **Compare Branch** (e.g. `main`, `dev`, or a QA branch) and **Target Tenant Branch** to automatically merge updates and trigger the SAP CI/CD build.
 * **When are they triggered?**
   ```yaml
   on:
     repository_dispatch:
       types: [trigger_<environment>_deployment]
-    workflow_dispatch:
   ```
 * **Steps performed:**
   1. Calls `_auto_merge.yml` with the tenant's specific `compare` branch and target `base` branch.
@@ -373,7 +372,10 @@ This document lists all deployment workflows in the repository. For each workflo
 
 ---
 
-## 🔗 End-to-End Workflow Connectivity Flow
+## 🔗 End-to-End Workflow Connectivity Flows
+
+### 📦 1. APM-02 Release Lifecycle Flow
+Shows the scheduled snapshot creation from `main*`, the 30-minute cherry-pick countdown window, building via tenant branch, and final sync back into `main*`:
 
 ```mermaid
 flowchart TD
@@ -384,55 +386,77 @@ flowchart TD
     classDef notify fill:#6b21a8,stroke:#c084fc,stroke-width:2px,color:#fff;
     classDef monitor fill:#be123c,stroke:#fb7185,stroke-width:2px,color:#fff;
 
-    %% 1. TRIGGERS
-    Cmd1["💬 @Jarvis share snapshot"]:::trigger
-    Cmd2["💬 @Jarvis deploy tenant"]:::trigger
+    Start["💬 @Jarvis share snapshot [min]<br/>(Initiated in Microsoft Teams)"]:::trigger
 
-    %% 2. APM-02 PIPELINE
-    subgraph FlowA["📦 APM-02 Release Lifecycle"]
-        W1["1️⃣ apm02_1_create_and_wait.yml<br/>• Creates snapshot from main<br/>• Opens tracking PRs"]:::process
-        WWait["⏳ 30-Min Cherry-Pick Window<br/>(Devs cherry-pick hotfixes)"]:::wait
-        W2["2️⃣ apm02_2_extend_wait.yml<br/>(Optional: Adjust timer)"]:::wait
-        WMergeT["🔀 Auto-Merge Snapshot<br/>into Tenant Branch"]:::process
-        WSAP["⚙️ SAP CI/CD Build Runs<br/>(Cloud Foundry deploy)"]:::process
-        W3["3️⃣ apm02_3_finalize_cycle.yml<br/>• Merges snapshot back to main<br/>• Deletes snapshot branch"]:::success
+    subgraph Step1["Step 1: Snapshot Creation & Countdown"]
+        W1["1️⃣ apm02_1_create_and_wait.yml<br/>• Creates snapshot branch from main*<br/>• Opens tracking PRs<br/>• Announces start to Teams"]:::process
+        WaitWin["⏳ 30-Min Waiting Window<br/>(Developers cherry-pick pending hotfixes)"]:::wait
+        W2["2️⃣ apm02_2_extend_wait.yml<br/>(Optional: @Jarvis extend wait)"]:::wait
     end
 
-    %% 3. TENANT AUTO-MERGE PIPELINE
-    subgraph FlowB["⚡ Tenant Auto-Merge Deployments (AIS-02, APM-01, Baystar, etc.)"]
-        WCall["4️⃣ deploy_tenant.yml<br/>(Core / DC / DC-AddIn)"]:::process
-        WAuto["5️⃣ _auto_merge.yml<br/>(Evaluates PR mergeability)"]:::process
-        WClean["✅ Zero Conflicts<br/>Direct Merge into Tenant"]:::success
-        WResolve["🔧 Has Conflicts<br/>auto_merge_conflict_resolver.yml<br/>(Auto-merges once dev pushes fix)"]:::monitor
-        WApprove["🛡️ Protected Branch<br/>auto_merge_approval_handler.yml<br/>(Auto-merges upon senior review)"]:::wait
+    subgraph Step2["Step 2: Tenant Deployment & SAP Build"]
+        MergeT["🔀 Auto-Merge Snapshot<br/>into Target Tenant Branch"]:::process
+        SAP["⚙️ SAP CI/CD Build Runs<br/>(Cloud Foundry deployment)"]:::process
     end
 
-    %% 4. MONITORS & ALERTS
-    subgraph FlowC["📢 Monitoring & Teams Alerts"]
-        WMon["6️⃣ Conflict Monitors<br/>apm02_4 (Base) & apm02_5 (Tenant)"]:::monitor
-        WNotif["🔔 _apm02_notify.yml<br/>(Posts Adaptive Cards to Teams)"]:::notify
+    subgraph Step3["Step 3: Finalize, Sync & Cleanup"]
+        W3["3️⃣ apm02_3_finalize_cycle.yml<br/>• Merges snapshot back into main*<br/>• Deletes temporary snapshot branch"]:::success
+        Alert["🔔 _apm02_notify.yml<br/>(Posts Success Card to Teams)"]:::notify
     end
 
-    %% CONNECTORS (APM-02)
-    Cmd1 -->|"trigger_apm02_deployment"| W1
-    W1 --> WWait
-    W2 -.->|"adjust_apm02_wait"| WWait
-    WWait -->|"Timer Finished / Deploy Now"| WMergeT
-    WMergeT --> WSAP
-    WSAP -->|"sap_cicd_finished"| W3
-    W3 --> WNotif
+    subgraph Guard["Pre-Deploy Conflict Monitoring"]
+        Mon["🛡️ Conflict Monitors<br/>apm02_4 (Base) & apm02_5 (Tenant)"]:::monitor
+    end
 
-    %% CONNECTORS (Tenant Auto-Merge)
-    Cmd2 -->|"trigger_tenant_deployment"| WCall
-    WCall --> WAuto
-    WAuto -->|"No Conflicts"| WClean
-    WAuto -->|"Conflicts Detected"| WResolve
-    WAuto -->|"Requires Approval"| WApprove
-    WClean & WResolve & WApprove -->|"Kicks off build"| WSAP
-
-    %% CONNECTORS (Monitors)
-    WMon -->|"Alert on Conflicts"| WNotif
+    Start -->|"trigger_apm02_deployment"| W1
+    W1 --> WaitWin
+    W2 -.->|"adjust_apm02_wait"| WaitWin
+    WaitWin -->|"Timer Expired or @Jarvis deploy now"| MergeT
+    MergeT --> SAP
+    SAP -->|"sap_cicd_finished"| W3
+    W3 --> Alert
+    Mon -.->|"Alerts if conflicts found"| Alert
 ```
 
+---
 
+### ⚡ 2. Direct Auto-Merge Deployment Flow (Tenant Callers)
+Shows how tenant deployments (AIS-02, APM-01, Baystar, etc.) are executed via direct auto-merge, self-healing conflict resolution, and reviewer approvals:
 
+```mermaid
+flowchart TD
+    classDef trigger fill:#4f46e5,stroke:#818cf8,stroke-width:2px,color:#fff;
+    classDef process fill:#0369a1,stroke:#38bdf8,stroke-width:2px,color:#fff;
+    classDef wait fill:#b45309,stroke:#fbbf24,stroke-width:2px,color:#fff;
+    classDef success fill:#047857,stroke:#34d399,stroke-width:2px,color:#fff;
+    classDef notify fill:#6b21a8,stroke:#c084fc,stroke-width:2px,color:#fff;
+    classDef monitor fill:#be123c,stroke:#fb7185,stroke-width:2px,color:#fff;
+
+    DeployCmd["💬 @Jarvis deploy tenant<br/>(e.g. @Jarvis deploy ais-02)"]:::trigger
+
+    subgraph Dispatch["1. Trigger & Setup"]
+        Caller["1️⃣ deploy_<tenant>.yml<br/>(Core / DC / DC-AddIn)"]:::process
+        Engine["2️⃣ _auto_merge.yml<br/>• Compares Source & Target branches<br/>• Checks PR mergeability<br/>• Stops CF apps if needed to prevent memory limits"]:::process
+    end
+
+    subgraph Pathways["2. Merge Decision Pathways"]
+        PathHappy["✅ Path A: Zero Conflicts (Direct Merge)<br/>Merges PR immediately with 0 manual clicks"]:::success
+        PathConflict["🔧 Path B: Has Conflicts<br/>auto_merge_conflict_resolver.yml<br/>(Alerts team; auto-merges once dev pushes fix)"]:::monitor
+        PathApproval["🛡️ Path C: Protected Branch<br/>auto_merge_approval_handler.yml<br/>(Auto-assigns senior reviewer; merges upon approval)"]:::wait
+    end
+
+    subgraph Completion["3. Deployment Execution"]
+        TenantBuild["⚙️ Tenant Branch Updated<br/>SAP CI/CD Deployment Triggered"]:::success
+        TeamsNotif["🔔 Microsoft Teams Status Card<br/>(Deployment Successful / In-Progress)"]:::notify
+    end
+
+    DeployCmd -->|"trigger_<tenant>_deployment"| Caller
+    Caller --> Engine
+    Engine -->|"Clean PR"| PathHappy
+    Engine -->|"Conflicts Found"| PathConflict
+    Engine -->|"Requires Approval"| PathApproval
+    PathHappy --> TenantBuild
+    PathConflict -->|"Dev pushes fix"| TenantBuild
+    PathApproval -->|"Reviewer approves"| TenantBuild
+    TenantBuild --> TeamsNotif
+```
