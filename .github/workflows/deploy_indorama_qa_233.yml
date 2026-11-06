@@ -1,0 +1,18 @@
+﻿name: "Deploy: Indorama QA 233"
+
+on:
+  repository_dispatch:
+    types: [trigger_indorama_qa_233_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "tenant/indorama-qa-233"
+      compare: "main"
+      deployment_name: "Indorama QA 233"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+    secrets: inherit

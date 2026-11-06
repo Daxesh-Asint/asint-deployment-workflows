@@ -1,0 +1,18 @@
+﻿name: "Deploy: Indorama Prod 933"
+
+on:
+  repository_dispatch:
+    types: [trigger_indorama_prod_933_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "tenant/indorama-prod-933"
+      compare: "tenant/indorama-qa-234"
+      deployment_name: "Indorama Prod 933"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+    secrets: inherit

@@ -1,0 +1,18 @@
+﻿name: "Deploy: HSC Prod"
+
+on:
+  repository_dispatch:
+    types: [trigger_hsc_prod_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "tenant/hemlock-prod"
+      compare: "tenant/hemlock-non-prod"
+      deployment_name: "HSC Prod"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+    secrets: inherit

@@ -1,0 +1,354 @@
+﻿name: UI Test Check
+
+on:
+  pull_request:
+    branches:
+      - dev
+
+jobs:
+  gate:
+    name: gate-ui
+    uses: ./.github/workflows/_pr_gate.yml
+    with: { check: ui }
+
+  test-and-comment:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install all dependencies
+        run: npm ci
+      
+      - name: Extract modules from git diff
+        id: extract
+        env:
+          GIT_BASE_REF: ${{ github.event.pull_request.base.sha }}
+          GIT_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node .github/scripts/ui-extract-modules-from-diff.js
+          
+          # Check if ui-modules-to-test.json exists
+          if [ ! -f "ui-modules-to-test.json" ]; then
+            echo "No changes detected"
+            echo "has_source_changes=false" >> $GITHUB_OUTPUT
+            echo "should_run_tests=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Count source files and test projects
+          SOURCE_COUNT=$(cat ui-modules-to-test.json | jq '.changedSourceFiles | length')
+          TEST_PROJECTS=$(cat ui-modules-to-test.json | jq 'to_entries | map(select(.key != "changedSourceFiles")) | length')
+          
+          echo "📊 Change Summary:"
+          echo "  Source files changed: $SOURCE_COUNT"
+          echo "  Test projects with changes: $TEST_PROJECTS"
+          echo ""
+          
+          # Set outputs
+          echo "source_count=$SOURCE_COUNT" >> $GITHUB_OUTPUT
+          echo "test_count=$TEST_PROJECTS" >> $GITHUB_OUTPUT
+          
+          # Decision logic
+          if [ "$SOURCE_COUNT" -eq 0 ] && [ "$TEST_PROJECTS" -eq 0 ]; then
+            # No changes at all - skip everything
+            echo "✓ No source or test files changed - skipping"
+            echo "has_source_changes=false" >> $GITHUB_OUTPUT
+            echo "should_run_tests=false" >> $GITHUB_OUTPUT
+            echo "should_check_coverage=false" >> $GITHUB_OUTPUT
+            echo "validation_status=skipped" >> $GITHUB_OUTPUT
+          elif [ "$SOURCE_COUNT" -eq 0 ] && [ "$TEST_PROJECTS" -gt 0 ]; then
+            # Only test files changed - run tests but skip coverage
+            echo "✓ Only test files changed - running tests without coverage check"
+            echo "has_source_changes=false" >> $GITHUB_OUTPUT
+            echo "should_run_tests=true" >> $GITHUB_OUTPUT
+            echo "should_check_coverage=false" >> $GITHUB_OUTPUT
+            echo "validation_status=tests_only" >> $GITHUB_OUTPUT
+          elif [ "$TEST_PROJECTS" -eq 0 ]; then
+            # Source files changed but no tests found - FAIL
+            echo "❌ ERROR: JavaScript source files were changed but no test files were found."
+            echo "Please include or update at least one test file matching *.test.js or *Test.js."
+            echo ""
+            echo "Changed source files:"
+            cat ui-modules-to-test.json | jq -r '.changedSourceFiles[] | "  - \(.project)/\(.file)"'
+            echo "has_source_changes=true" >> $GITHUB_OUTPUT
+            echo "should_run_tests=false" >> $GITHUB_OUTPUT
+            echo "should_check_coverage=false" >> $GITHUB_OUTPUT
+            echo "validation_status=failed" >> $GITHUB_OUTPUT
+          else
+            # Source files changed AND tests exist - proceed with coverage
+            echo "✓ Source files changed with corresponding tests - proceeding with test execution and coverage"
+            echo "has_source_changes=true" >> $GITHUB_OUTPUT
+            echo "should_run_tests=true" >> $GITHUB_OUTPUT
+            echo "should_check_coverage=true" >> $GITHUB_OUTPUT
+            echo "validation_status=passed" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Run tests by module
+        if: steps.extract.outputs.should_run_tests == 'true'
+        env:
+          CI: true
+          GITHUB_ACTIONS: true
+        run: |
+          echo "Reading ui-modules-to-test.json..."
+          MODULES_JSON=$(cat ui-modules-to-test.json)
+          
+          # Initialize skipped projects tracker
+          echo "[]" > ui-skipped-projects.json
+          
+          # Loop through each project, skipping metadata keys
+          echo "$MODULES_JSON" | jq -r 'keys[] | select(. != "changedSourceFiles")' | while read project; do
+            echo "=========================================="
+            echo "Testing: $project"
+            echo "=========================================="
+            
+            # Check if project has unit-tests-headless script before attempting to run
+            PKG="$project/package.json"
+            if [ ! -f "$PKG" ]; then
+              echo "⏭ SKIP $project: no package.json found"
+              jq --arg p "$project" --arg r "no package.json found" '. + [{"project": $p, "reason": $r}]' ui-skipped-projects.json > ui-skipped-projects.tmp.json && mv ui-skipped-projects.tmp.json ui-skipped-projects.json
+              continue
+            fi
+            if ! jq empty "$PKG" >/dev/null 2>&1; then
+              echo "⏭ SKIP $project: package.json is not valid JSON"
+              jq --arg p "$project" --arg r "invalid package.json" '. + [{"project": $p, "reason": $r}]' ui-skipped-projects.json > ui-skipped-projects.tmp.json && mv ui-skipped-projects.tmp.json ui-skipped-projects.json
+              continue
+            fi
+            if ! jq -e '.scripts["unit-tests-headless"] | . != null and . != ""' "$PKG" >/dev/null 2>&1; then
+              echo "⏭ SKIP $project: unit-tests-headless script not configured"
+              jq --arg p "$project" --arg r "unit-tests-headless script not configured" '. + [{"project": $p, "reason": $r}]' ui-skipped-projects.json > ui-skipped-projects.tmp.json && mv ui-skipped-projects.tmp.json ui-skipped-projects.json
+              continue
+            fi
+            
+            # Get unique modules for this project that have changed tests
+            MODULES=$(echo "$MODULES_JSON" | jq -r ".\"$project\" | map(select(.changedTests | length > 0)) | map(.module) | unique | join(\",\")")
+            
+            if [ -z "$MODULES" ]; then
+              echo "No modules with changed tests found for $project"
+              continue
+            fi
+            
+            echo "Modules to test: $MODULES"
+            echo ""
+            
+            # Navigate to project directory
+            cd "$project"
+            
+            # Set modules as environment variable for wdio.conf.js
+            export TEST_MODULES_LIST="$MODULES"
+            
+            echo ""
+            echo "Running tests for modules..."
+            echo ""
+            
+            # Run tests (wdio.conf.js will inject modules into window.TEST_MODULES)
+            npm run unit-tests-headless 2>&1 | tee "../${project}-ui-test-output.log" || true
+            
+            cd ..
+            echo ""
+          done
+          
+          echo "✓ All project tests completed"
+      
+      - name: Validate coverage collected
+        if: steps.extract.outputs.should_run_tests == 'true'
+        run: |
+          echo "Validating coverage files..."
+          
+          MODULES_JSON=$(cat ui-modules-to-test.json)
+          SKIPPED_PROJECTS=$(cat ui-skipped-projects.json 2>/dev/null || echo "[]")
+          
+          echo "$MODULES_JSON" | jq -r 'keys[] | select(. != "changedSourceFiles")' | while read project; do
+            # Skip projects that were skipped during test execution
+            if echo "$SKIPPED_PROJECTS" | jq -e --arg p "$project" 'map(.project) | contains([$p])' >/dev/null 2>&1; then
+              echo "⏭ Skipping coverage check for $project (unit-tests-headless not configured)"
+              continue
+            fi
+            
+            COVERAGE_FILE="${project}/tmp/coverage-reports/json/coverage-final.json"
+            
+            if [ -f "$COVERAGE_FILE" ]; then
+              echo "✓ Coverage file found for $project"
+              # Validate it's valid JSON
+              if jq empty "$COVERAGE_FILE" 2>/dev/null; then
+                echo "✓ Coverage file is valid JSON"
+              else
+                echo "⚠ Warning: Coverage file exists but is not valid JSON"
+              fi
+            else
+              echo "⚠ Warning: No coverage file found for $project at $COVERAGE_FILE"
+            fi
+          done
+      
+      - name: Parse results and generate comment
+        if: steps.extract.outputs.should_run_tests == 'true'
+        run: |
+          node .github/scripts/ui-parse-qunit-results.js
+      
+      - name: Parse coverage results
+        id: coverage
+        if: steps.extract.outputs.should_run_tests == 'true' && steps.extract.outputs.should_check_coverage == 'true'
+        continue-on-error: true
+        run: |
+          node .github/scripts/ui-parse-coverage-results.js
+      
+      - name: Check for coverage bypass label
+        id: check_bypass
+        if: steps.extract.outputs.should_run_tests == 'true' && steps.extract.outputs.should_check_coverage == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number
+            });
+            
+            const hasBypassLabel = labels.some(label => label.name === 'skip-coverage-check');
+            core.setOutput('bypass_coverage', hasBypassLabel);
+            
+            if (hasBypassLabel) {
+              console.log('⚠️ Coverage check bypass label detected');
+            }
+      
+      - name: Post PR comment
+        if: always() && steps.extract.outputs.validation_status != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let commentBody = '';
+            const validationStatus = '${{ steps.extract.outputs.validation_status }}';
+            
+            if (validationStatus === 'failed') {
+              // Validation failed - create error comment
+              const sourceFiles = JSON.parse(fs.readFileSync('ui-modules-to-test.json', 'utf8')).changedSourceFiles;
+              const fileList = sourceFiles.map(f => `- \`${f.project}/${f.file}\``).join('\n');
+              
+              commentBody = `# 🧪 UI Test Check\n\n` +
+                           `## ❌ Test Validation Failed\n\n` +
+                           `**JavaScript source files were changed but no test files were found.**\n\n` +
+                           `Please include or update at least one test file matching \`*.test.js\` or \`*Test.js\`.\n\n` +
+                           `### Changed Source Files:\n${fileList}\n\n` +
+                           `---\n\n` +
+                           `💡 **Tip:** Create test files in \`<project>/webapp/test/unit/\` that match your source file structure.`;
+            } else if (validationStatus === 'skipped') {
+              // No source changes - create info comment
+              commentBody = `# 🧪 UI Test Check\n\n` +
+                           `## ℹ️ No Changes Detected\n\n` +
+                           `**No source or test files were modified in this PR.**\n\n` +
+                           `Test execution was skipped as no changes were detected.`;
+            } else if (validationStatus === 'tests_only') {
+              // Only test files changed
+              commentBody = fs.existsSync('ui-pr-comment.md') ? 
+                           fs.readFileSync('ui-pr-comment.md', 'utf8') : 
+                           `# 🧪 UI Test Check\n\n## ✅ Test Files Modified\n\n**Only test files were modified - no source changes detected.**\n\n`;
+              
+              // Add note about coverage being skipped
+              if (commentBody.includes('📊 Summary')) {
+                commentBody = commentBody.replace(
+                  '## 📊 Summary',
+                  '> ℹ️ **Coverage Check Skipped**\n' +
+                  '> \n' +
+                  '> No source files were changed in this PR, only test files.\n' +
+                  '> Coverage check is skipped but tests were executed to verify they pass.\n\n' +
+                  '## 📊 Summary'
+                );
+              }
+            } else if (fs.existsSync('ui-pr-comment.md')) {
+              // Tests ran successfully
+              commentBody = fs.readFileSync('ui-pr-comment.md', 'utf8');
+              
+              // Add bypass warning if label exists and coverage failed
+              const bypassCoverage = '${{ steps.check_bypass.outputs.bypass_coverage }}' === 'true';
+              const coverageFailed = '${{ steps.coverage.outcome }}' === 'failure';
+              
+              if (bypassCoverage && coverageFailed) {
+                commentBody = commentBody.replace(
+                  '### 📊 Code Coverage',
+                  '### 📊 Code Coverage\n\n' +
+                  '> ⚠️ **Coverage Check Bypassed**\n' +
+                  '> \n' +
+                  '> The `skip-coverage-check` label is applied to this PR.\n' +
+                  '> Coverage is below the 80% threshold but the check will not block the merge.\n\n'
+                );
+              }
+            } else {
+              return;
+            }
+            
+            // Find existing comments from this workflow
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number
+            });
+            
+            const botComments = comments.filter(comment => 
+              comment.user.login === 'github-actions[bot]' &&
+              comment.body.includes('UI Test Check')
+            );
+            
+            // Mark old comments as outdated
+            for (const oldComment of botComments) {
+              const outdatedBody = '> ⚠️ **This report is outdated.** See the latest report below.\n\n' + 
+                                   '<details>\n<summary>View outdated report</summary>\n\n' +
+                                   oldComment.body +
+                                   '\n</details>';
+              
+              try {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: oldComment.id,
+                  body: outdatedBody
+                });
+              } catch (e) {
+                core.warning(`Could not update PR comment (${e.status ?? ''} ${e.message}); the result is still enforced by this job.`);
+              }
+            }
+
+            // Create new comment
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body: commentBody
+              });
+            } catch (e) {
+              core.warning(`Could not post PR comment (${e.status ?? ''} ${e.message}); the result is still enforced by this job.`);
+            }
+      
+      - name: Fail if validation failed
+        if: steps.extract.outputs.validation_status == 'failed'
+        run: |
+          echo "❌ Validation failed: Tests are mandatory for source code changes"
+          exit 1
+      
+      - name: Fail if coverage below threshold
+        if: steps.coverage.outcome == 'failure' && steps.check_bypass.outputs.bypass_coverage != 'true'
+        run: |
+          echo "❌ Coverage check failed: Coverage is below 80% threshold"
+          exit 1
+      
+      - name: Log coverage bypass
+        if: steps.coverage.outcome == 'failure' && steps.check_bypass.outputs.bypass_coverage == 'true'
+        run: |
+          echo "⚠️ Coverage check bypassed: 'skip-coverage-check' label detected"
+          echo "⚠️ PR can be merged despite coverage below 80% threshold"

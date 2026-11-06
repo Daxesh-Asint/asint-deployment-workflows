@@ -1,0 +1,22 @@
+﻿name: "Deploy: APM-01"
+
+on:
+  repository_dispatch:
+    types: [trigger_apm01_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "tenant/asint-apm-01-new"
+      compare: "main"
+      deployment_name: "APM-01"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+      cf_stop_app: "crawler-layer-backend"
+      cf_api: "https://api.cf.eu10-004.hana.ondemand.com"
+      cf_org: "asint-apm-01"
+      cf_space: "demo"
+    secrets: inherit

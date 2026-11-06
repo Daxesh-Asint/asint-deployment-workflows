@@ -1,0 +1,341 @@
+﻿name: "APM-02: 3. Finalize & Sync to Main"
+
+on:
+  repository_dispatch:
+    types: [sap_cicd_finished]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  # ── Guard: dump payload and filter by job name ──
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      job_name: ${{ steps.extract.outputs.job_name }}
+      is_target_job: ${{ steps.extract.outputs.is_target_job }}
+      env_id: ${{ steps.extract.outputs.env_id }}
+      env_name: ${{ steps.extract.outputs.env_name }}
+      base_branch: ${{ steps.extract.outputs.base_branch }}
+      tenant_branch: ${{ steps.extract.outputs.tenant_branch }}
+      label_prefix: ${{ steps.extract.outputs.label_prefix }}
+    steps:
+      - name: Dump Webhook Payload
+        run: |
+          echo "=== Full client_payload ==="
+          echo '${{ toJSON(github.event.client_payload) }}'
+          echo "=== event.action ==="
+          echo '${{ github.event.action }}'
+
+      - name: Extract Job Name and Determine Environment
+        id: extract
+        run: |
+          JOB_NAME="${{ github.event.client_payload.resource_name }}"
+          echo "Received resource_name: [$JOB_NAME]"
+          echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
+
+          # Match from most specific to least specific
+          if echo "$JOB_NAME" | grep -qi "AsInt-APM-02-DC-AddIn"; then
+            echo "✅ Target job matched: APM-02 DC AddIn"
+            echo "is_target_job=true" >> $GITHUB_OUTPUT
+            echo "env_id=apm02_dc_addin" >> $GITHUB_OUTPUT
+            echo "env_name=APM-02 DC AddIn" >> $GITHUB_OUTPUT
+            echo "base_branch=main-dc-addin" >> $GITHUB_OUTPUT
+            echo "tenant_branch=tenant/asint-apm-02-dc-addin" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02 DC AddIn" >> $GITHUB_OUTPUT
+          elif echo "$JOB_NAME" | grep -qi "AsInt-APM-02-DC"; then
+            echo "✅ Target job matched: APM-02 DC"
+            echo "is_target_job=true" >> $GITHUB_OUTPUT
+            echo "env_id=apm02_dc" >> $GITHUB_OUTPUT
+            echo "env_name=APM-02 DC" >> $GITHUB_OUTPUT
+            echo "base_branch=main-dc" >> $GITHUB_OUTPUT
+            echo "tenant_branch=tenant/asint-apm-02-dc" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02 DC" >> $GITHUB_OUTPUT
+          elif echo "$JOB_NAME" | grep -qi "AsInt-APM-02"; then
+            echo "✅ Target job matched: APM-02"
+            echo "is_target_job=true" >> $GITHUB_OUTPUT
+            echo "env_id=apm02" >> $GITHUB_OUTPUT
+            echo "env_name=APM-02" >> $GITHUB_OUTPUT
+            echo "base_branch=main" >> $GITHUB_OUTPUT
+            echo "tenant_branch=tenant/asint-apm-02-v2" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Not an APM-02 family job. Skipping finalize."
+            echo "is_target_job=false" >> $GITHUB_OUTPUT
+          fi
+
+  finalize:
+    needs: guard
+    if: needs.guard.outputs.is_target_job == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      failure_reason: ${{ steps.eval.outputs.failure_reason }}
+      merge_failure_reason: ${{ steps.merge.outputs.failure_reason }}
+      snapshot: ${{ steps.eval.outputs.snapshot }}
+      pr_number: ${{ steps.eval.outputs.pr_number }}
+      tenant_pr_number: ${{ steps.eval.outputs.tenant_pr_number }}
+    steps:
+      - name: Check Current State
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABEL_PREFIX: ${{ needs.guard.outputs.label_prefix }}
+        run: |
+          DEPLOYING_PR=$(gh pr list --repo ${{ github.repository }} --state open --limit 500 --json number,labels --jq ".[] | select(.labels[].name | test(\"^${LABEL_PREFIX} (Deploying|Blocked)$\")) | .number" | head -n 1)
+          
+          if [ -z "$DEPLOYING_PR" ]; then
+            echo "❌ ERROR: No active deployment found (No PR with '${LABEL_PREFIX} Deploying' or '${LABEL_PREFIX} Blocked' label). State is IDLE."
+            exit 1
+          fi
+          echo "✅ State is DEPLOYING. Proceeding."
+
+      - name: Evaluate SAP CI/CD Payload and Get Snapshot
+        id: eval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABEL_PREFIX: ${{ needs.guard.outputs.label_prefix }}
+          TENANT_BRANCH: ${{ needs.guard.outputs.tenant_branch }}
+        run: |
+          STATUS="${{ github.event.client_payload.status }}"
+          
+          # Extract the snapshot branch name securely from our Tracking PR!
+          DEPLOYING_PR=$(gh pr list --repo ${{ github.repository }} --state open --limit 500 --json number,headRefName,labels --jq "[.[] | select(.labels[].name | test(\"^${LABEL_PREFIX} (Deploying|Blocked)$\"))][0]")
+          SNAPSHOT=$(echo "$DEPLOYING_PR" | jq -r '.headRefName')
+          PR_NUMBER=$(echo "$DEPLOYING_PR" | jq -r '.number')
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "snapshot=$SNAPSHOT" >> $GITHUB_OUTPUT
+          
+          echo "SAP CI/CD Status: $STATUS"
+          echo "Snapshot Branch: $SNAPSHOT"
+          
+          # Check if the deployment PR into tenant branch is still open (meaning it hasn't been merged)
+          TENANT_PR=$(gh pr list --repo ${{ github.repository }} --base "$TENANT_BRANCH" --head "$SNAPSHOT" --state open --json number --jq '.[0].number')
+          if [ -n "$TENANT_PR" ] && [ "$TENANT_PR" != "null" ]; then
+            echo "❌ ERROR: Snapshot $SNAPSHOT has not been merged into $TENANT_BRANCH yet (PR #$TENANT_PR is still open). The SAP CI/CD success signal is invalid or premature. Refusing to merge back."
+            exit 1
+          fi
+          
+          # Query the merged tenant PR number for notifications
+          MERGED_TENANT_PR=$(gh pr list --repo ${{ github.repository }} --base "$TENANT_BRANCH" --head "$SNAPSHOT" --state all --json number --jq '.[0].number')
+          echo "tenant_pr_number=$MERGED_TENANT_PR" >> $GITHUB_OUTPUT
+          
+          if [ "$STATUS" != "INFO" ] && [ "$STATUS" != "SUCCESS" ]; then
+            echo "❌ SAP CI/CD Deployment Failed."
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "failure_reason=sap_cicd" >> $GITHUB_OUTPUT
+          else
+            echo "✅ SAP CI/CD Deployment Succeeded."
+            echo "success=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set State to FAILED if SAP CI/CD failed
+        if: steps.eval.outputs.success == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENV_NAME: ${{ needs.guard.outputs.env_name }}
+          BASE_BRANCH: ${{ needs.guard.outputs.base_branch }}
+          LABEL_PREFIX: ${{ needs.guard.outputs.label_prefix }}
+        run: |
+          gh pr edit "${{ steps.eval.outputs.pr_number }}" --repo ${{ github.repository }} --title "🔴 ${ENV_NAME} Failed: Merging from ${{ steps.eval.outputs.snapshot }} to ${BASE_BRANCH}" --remove-label "${LABEL_PREFIX} Deploying" --remove-label "${LABEL_PREFIX} Blocked" --add-label "${LABEL_PREFIX} Failed"
+          echo "✅ State set to FAILED"
+          exit 1 # Stop workflow here
+
+      - uses: actions/checkout@v4
+        if: steps.eval.outputs.success == 'true'
+        with:
+          ref: ${{ steps.eval.outputs.snapshot }}
+          fetch-depth: 0
+
+      - name: Merge snapshot into base branch
+        if: steps.eval.outputs.success == 'true'
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ENV_NAME: ${{ needs.guard.outputs.env_name }}
+          BASE_BRANCH: ${{ needs.guard.outputs.base_branch }}
+          LABEL_PREFIX: ${{ needs.guard.outputs.label_prefix }}
+        run: |
+          SNAPSHOT="${{ steps.eval.outputs.snapshot }}"
+          PR_NUMBER="${{ steps.eval.outputs.pr_number }}"
+          git fetch --all
+
+          DIFF=$(git diff origin/"$BASE_BRANCH"...origin/"$SNAPSHOT" --name-only || true)
+          if echo "$DIFF" | grep -qE "^(mta\.yaml|xs-security\.json)$"; then
+            echo "❌ ERROR: Protected file changed (mta.yaml or xs-security.json). Cannot proceed."
+            echo "failure_reason=protected_file" >> $GITHUB_OUTPUT
+            gh pr edit "$PR_NUMBER" --repo ${{ github.repository }} --title "🟠 ${ENV_NAME} Blocked (Protected Files): Merging from $SNAPSHOT to ${BASE_BRANCH}" --remove-label "${LABEL_PREFIX} Deploying" --add-label "${LABEL_PREFIX} Blocked"
+            gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} --body "⚠️ Protected file changed (mta.yaml or xs-security.json). Cannot proceed further. Manual confirmation required."
+            exit 1
+          fi
+
+          if [ -z "$(git diff origin/"$BASE_BRANCH"...origin/"$SNAPSHOT")" ]; then
+            echo "ℹ️ No new commits to sync back to ${BASE_BRANCH}. Closing PR."
+            gh pr close "$PR_NUMBER" --repo ${{ github.repository }}
+            gh label create "${LABEL_PREFIX} Deployed" --color "#0E8A16" --description "${ENV_NAME} deployment completed successfully" --repo ${{ github.repository }} 2>/dev/null || true
+            gh pr edit "$PR_NUMBER" --repo ${{ github.repository }} --title "✅ ${ENV_NAME} Deployed: Merging from $SNAPSHOT to ${BASE_BRANCH}" --remove-label "${LABEL_PREFIX} Deploying" --remove-label "${LABEL_PREFIX} Blocked" --add-label "${LABEL_PREFIX} Deployed"
+          else
+            for i in {1..10}; do
+              STATUS=$(gh pr view "$PR_NUMBER" --repo ${{ github.repository }} --json mergeable --jq '.mergeable')
+              if [[ "$STATUS" == "MERGEABLE" ]]; then
+                gh pr ready "$PR_NUMBER" --repo ${{ github.repository }} 2>/dev/null || true
+                if gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --merge; then
+                  echo "✅ PR #$PR_NUMBER merged into ${BASE_BRANCH} successfully"
+                  gh label create "${LABEL_PREFIX} Deployed" --color "#0E8A16" --description "${ENV_NAME} deployment completed successfully" --repo ${{ github.repository }} 2>/dev/null || true
+                  gh pr edit "$PR_NUMBER" --repo ${{ github.repository }} --title "✅ ${ENV_NAME} Deployed: Merging from $SNAPSHOT to ${BASE_BRANCH}" --remove-label "${LABEL_PREFIX} Deploying" --remove-label "${LABEL_PREFIX} Blocked" --add-label "${LABEL_PREFIX} Deployed"
+                else
+                  gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} --body "Auto-merge into ${BASE_BRANCH} failed."
+                  exit 1
+                fi
+                break
+              elif [[ "$STATUS" == "CONFLICTING" ]]; then
+                gh pr edit "$PR_NUMBER" --repo ${{ github.repository }} --title "🟠 ${ENV_NAME} Blocked (Conflicts): Merging from $SNAPSHOT to ${BASE_BRANCH}" --remove-label "${LABEL_PREFIX} Deploying" --add-label "${LABEL_PREFIX} Blocked"
+                gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} --body "⚠️ Merge conflict detected. Manual resolution required. State is BLOCKED."
+                echo "failure_reason=conflict" >> $GITHUB_OUTPUT
+                exit 1
+              fi
+              sleep 10
+            done
+          fi
+          
+          echo "✅ State reset to IDLE (Cycle Closed)"
+          echo "main_pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+
+  update-wiki-finalize:
+    needs: [guard, finalize]
+    if: always() && needs.guard.outputs.is_target_job == 'true' && needs.finalize.outputs.pr_number != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Checkout Wiki
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+          token: ${{ github.token }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Update Wiki (Finalize)
+        run: |
+          if [ -d "wiki" ]; then
+            node .github/scripts/update_wiki.js || echo "Wiki update failed"
+          else
+            echo "Wiki repo not found, skipping."
+          fi
+        env:
+          WIKI_PAYLOAD: '{"action": "${{ needs.finalize.result == ''success'' && ''finalize-success'' || ''finalize-fail'' }}", "environment": "${{ needs.guard.outputs.env_name }}", "snapshot": "${{ needs.finalize.outputs.snapshot }}", "pr_number": "${{ needs.finalize.outputs.pr_number }}"}'
+
+  notify-success:
+    needs: [guard, finalize, update-wiki-finalize]
+    if: always() && needs.guard.outputs.is_target_job == 'true' && needs.finalize.result == 'success'
+    uses: ./.github/workflows/_apm02_notify.yml
+    with:
+      env_name: ${{ needs.guard.outputs.env_name }}
+      base_branch: ${{ needs.guard.outputs.base_branch }}
+      tenant_branch: ${{ needs.guard.outputs.tenant_branch }}
+      card_title: "✅ ${{ needs.guard.outputs.env_name }} Deployment Cycle Complete"
+      card_subtitle: "${{ needs.guard.outputs.env_name }} deployed & merged back into ${{ needs.guard.outputs.base_branch }} successfully. Snapshot branch deleted."
+      status_text: "✅ Deployment & Merge Complete"
+      status_color: "good"
+      snapshot_branch: "${{ needs.finalize.outputs.snapshot }} (Deleted 🗑️)"
+      pr_number: ${{ needs.finalize.outputs.pr_number }}
+      tenant_pr_number: ${{ needs.finalize.outputs.tenant_pr_number }}
+      extra_fact_title: "Cycle State"
+      extra_fact_value: "Reset to IDLE. Snapshot branch deleted."
+      action_label: "Review ${{ needs.guard.outputs.base_branch }} PR #${{ needs.finalize.outputs.pr_number }}"
+      action_url: "https://github.com/${{ github.repository }}/pull/${{ needs.finalize.outputs.pr_number }}"
+    secrets: inherit
+
+  delete-snapshot-branch:
+    needs: [guard, finalize, update-wiki-finalize, notify-success]
+    if: always() && needs.guard.outputs.is_target_job == 'true' && needs.finalize.result == 'success' && needs.notify-success.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete Remote Snapshot Branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SNAPSHOT="${{ needs.finalize.outputs.snapshot }}"
+          echo "Target snapshot branch: [$SNAPSHOT]"
+          
+          # Safety check: branch must strictly match snapshot/main-
+          if [[ "$SNAPSHOT" =~ ^snapshot/main- ]]; then
+            echo "🗑️ Deleting remote snapshot branch $SNAPSHOT via GitHub API..."
+            gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$SNAPSHOT" || echo "Branch $SNAPSHOT might already be deleted."
+            echo "✅ Remote snapshot branch $SNAPSHOT deleted successfully."
+          else
+            echo "⚠️ Safety guard: '$SNAPSHOT' does not match snapshot/main-*. Skipping deletion."
+          fi
+
+  notify-sap-failure:
+    needs: [guard, finalize]
+    if: always() && needs.guard.outputs.is_target_job == 'true' && needs.finalize.result == 'failure' && needs.finalize.outputs.failure_reason == 'sap_cicd'
+    uses: ./.github/workflows/_apm02_notify.yml
+    with:
+      env_name: ${{ needs.guard.outputs.env_name }}
+      base_branch: ${{ needs.guard.outputs.base_branch }}
+      tenant_branch: ${{ needs.guard.outputs.tenant_branch }}
+      card_title: "❌ ${{ needs.guard.outputs.env_name }} Deployment Failed"
+      card_subtitle: "${{ needs.guard.outputs.env_name }} deployment failed due to SAP CI/CD Pipeline failure. Cannot merge this snapshot into ${{ needs.guard.outputs.base_branch }}."
+      status_text: "❌ Action Required"
+      status_color: "attention"
+      snapshot_branch: ${{ needs.finalize.outputs.snapshot }}
+      pr_number: ${{ needs.finalize.outputs.pr_number }}
+      tenant_pr_number: ${{ needs.finalize.outputs.tenant_pr_number }}
+      extra_fact_title: "State Locked"
+      extra_fact_value: "New snapshots cannot be created until this is resolved."
+      action_label: "Review ${{ needs.guard.outputs.base_branch }} PR #${{ needs.finalize.outputs.pr_number }}"
+      action_url: "https://github.com/${{ github.repository }}/pull/${{ needs.finalize.outputs.pr_number }}"
+      show_jarvis_recovery: true
+    secrets: inherit
+
+  notify-main-merge-conflict:
+    needs: [guard, finalize]
+    if: always() && needs.guard.outputs.is_target_job == 'true' && needs.finalize.result == 'failure' && needs.finalize.outputs.merge_failure_reason == 'conflict'
+    uses: ./.github/workflows/_apm02_notify.yml
+    with:
+      env_name: ${{ needs.guard.outputs.env_name }}
+      base_branch: ${{ needs.guard.outputs.base_branch }}
+      tenant_branch: ${{ needs.guard.outputs.tenant_branch }}
+      card_title: "${{ needs.guard.outputs.env_name }} Deployment completed, but deployment cycle is not completed. Next Snapshot from ${{ needs.guard.outputs.base_branch }} cannot be created until this snapshot is merged back."
+      card_subtitle: "${{ needs.guard.outputs.env_name }} deployment completed, got merge conflict while merging snapshot back into ${{ needs.guard.outputs.base_branch }}."
+      status_text: "⚠️ Manual Resolution Required"
+      status_color: "attention"
+      snapshot_branch: ${{ needs.finalize.outputs.snapshot }}
+      pr_number: ${{ needs.finalize.outputs.pr_number }}
+      tenant_pr_number: ${{ needs.finalize.outputs.tenant_pr_number }}
+      extra_fact_title: "State Locked"
+      extra_fact_value: "New snapshots cannot be created until this is resolved."
+      action_label: "Review ${{ needs.guard.outputs.base_branch }} PR #${{ needs.finalize.outputs.pr_number }}"
+      action_url: "https://github.com/${{ github.repository }}/pull/${{ needs.finalize.outputs.pr_number }}"
+    secrets: inherit
+
+  notify-protected-file-conflict:
+    needs: [guard, finalize]
+    if: always() && needs.guard.outputs.is_target_job == 'true' && needs.finalize.result == 'failure' && needs.finalize.outputs.merge_failure_reason == 'protected_file'
+    uses: ./.github/workflows/_apm02_notify.yml
+    with:
+      env_name: ${{ needs.guard.outputs.env_name }}
+      base_branch: ${{ needs.guard.outputs.base_branch }}
+      tenant_branch: ${{ needs.guard.outputs.tenant_branch }}
+      card_title: "❌ ${{ needs.guard.outputs.env_name }} Deployment Blocked: Protected File Changed"
+      card_subtitle: "Protected file (mta.yaml or xs-security.json) changed. Cannot proceed further. Manual confirmation required."
+      status_text: "⛔ Deployment Blocked"
+      status_color: "attention"
+      snapshot_branch: ${{ needs.finalize.outputs.snapshot }}
+      pr_number: ${{ needs.finalize.outputs.pr_number }}
+      tenant_pr_number: ${{ needs.finalize.outputs.tenant_pr_number }}
+      extra_fact_title: "Action Required"
+      extra_fact_value: "Review the PR. The changes must be approved or resolved manually."
+      action_label: "Review ${{ needs.guard.outputs.base_branch }} PR #${{ needs.finalize.outputs.pr_number }}"
+      action_url: "https://github.com/${{ github.repository }}/pull/${{ needs.finalize.outputs.pr_number }}"
+    secrets: inherit

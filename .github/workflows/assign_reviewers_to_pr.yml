@@ -1,0 +1,147 @@
+﻿name: Request dev review
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    branches:
+      - dev
+
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to evaluate"
+        required: true
+        type: number
+      allowed_authors:
+        description: "Comma-separated GitHub usernames allowed to trigger review"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    name: gate-review
+    uses: ./.github/workflows/_pr_gate.yml
+    with: { check: review }
+
+  request-review:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Evaluate PR and request review
+        uses: actions/github-script@v7
+        env:
+          MANUAL_PR_NUMBER: ${{ inputs.pr_number }}
+          MANUAL_ALLOWED_AUTHORS: ${{ inputs.allowed_authors }}
+          AUTO_ALLOWED_AUTHORS: ${{ vars.ALLOWED_REVIEW_AUTHORS }}
+        with:
+          script: |
+            const reviewer = "StillSomehowSane";
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            function parseUserList(raw) {
+              return new Set(
+                (raw || "")
+                  .split(",")
+                  .map(s => s.trim())
+                  .filter(Boolean)
+              );
+            }
+
+            let pr;
+            let allowedAuthors;
+
+            if (context.eventName === "workflow_dispatch") {
+              const rawPrNumber = process.env.MANUAL_PR_NUMBER;
+              const rawAllowedAuthors = process.env.MANUAL_ALLOWED_AUTHORS;
+
+              core.info(`Manual run for PR #${rawPrNumber}`);
+              core.info(`Manual allowed authors input: ${rawAllowedAuthors}`);
+
+              if (!rawPrNumber || Number.isNaN(Number(rawPrNumber)) || Number(rawPrNumber) <= 0) {
+                core.setFailed(`Invalid pr_number input: "${rawPrNumber}"`);
+                return;
+              }
+
+              allowedAuthors = parseUserList(rawAllowedAuthors);
+
+              if (allowedAuthors.size === 0) {
+                core.setFailed("allowed_authors input is empty. Provide a comma-separated list of usernames.");
+                return;
+              }
+
+              const response = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: Number(rawPrNumber)
+              });
+
+              pr = response.data;
+            } else {
+              pr = context.payload.pull_request;
+              allowedAuthors = parseUserList(process.env.AUTO_ALLOWED_AUTHORS);
+
+              if (allowedAuthors.size === 0) {
+                core.setFailed(
+                  "Repository variable ALLOWED_REVIEW_AUTHORS is empty or missing. " +
+                  "Set it to a comma-separated list of usernames."
+                );
+                return;
+              }
+            }
+
+            if (!pr || !pr.user) {
+              core.info("No PR found. Exiting.");
+              return;
+            }
+
+            const author = pr.user.login;
+            const pull_number = pr.number;
+            const baseBranch = pr.base.ref;
+
+            core.info(`PR #${pull_number} by ${author} targeting ${baseBranch}`);
+            core.info(`Allowed authors: ${Array.from(allowedAuthors).join(", ")}`);
+
+            if (!["dev"].includes(baseBranch)) {
+              core.info("PR not targeting dev. Exiting.");
+              return;
+            }
+
+            if (!allowedAuthors.has(author)) {
+              core.info(`Author ${author} not in allowlist.`);
+              return;
+            }
+
+            const reviewers = await github.rest.pulls.listRequestedReviewers({
+              owner,
+              repo,
+              pull_number
+            });
+
+            const alreadyRequested = (reviewers.data.users || []).some(
+              user => user.login === reviewer
+            );
+
+            if (alreadyRequested) {
+              core.info(`${reviewer} already requested.`);
+              return;
+            }
+
+            await github.rest.pulls.requestReviewers({
+              owner,
+              repo,
+              pull_number,
+              reviewers: [reviewer]
+            });
+
+            core.info(`Requested review from ${reviewer}`);

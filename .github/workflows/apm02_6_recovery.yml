@@ -1,0 +1,311 @@
+﻿name: "APM-02 Family: 6. Recovery & Retry"
+
+on:
+  push:
+    branches:
+      - 'snapshot/main-*'
+      - 'snapshot/main-dc-*'
+      - 'snapshot/main-dc-addin-*'
+  repository_dispatch:
+    types: 
+      - retrigger_apm02_deployment
+      - redeploy_apm02_fix
+      - retrigger_apm02_dc_deployment
+      - redeploy_apm02_dc_fix
+      - retrigger_apm02_dc_addin_deployment
+      - redeploy_apm02_dc_addin_fix
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # STEP 1 — Guard & State Inspection
+  # ──────────────────────────────────────────────────────────
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      env_name: ${{ steps.check.outputs.env_name }}
+      base_branch: ${{ steps.check.outputs.base_branch }}
+      tenant_branch: ${{ steps.check.outputs.tenant_branch }}
+      label_prefix: ${{ steps.check.outputs.label_prefix }}
+      snapshot_branch: ${{ steps.check.outputs.snapshot_branch }}
+      pr_number: ${{ steps.check.outputs.pr_number }}
+      recovery_type: ${{ steps.check.outputs.recovery_type }}
+    steps:
+      - name: Inspect Active Failed Deployment
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EVENT_NAME="${{ github.event_name }}"
+          echo "Triggered by event: $EVENT_NAME"
+
+          # Determine target environment from event
+          if [ "$EVENT_NAME" == "push" ]; then
+            PUSHED_BRANCH="${GITHUB_REF#refs/heads/}"
+            echo "Pushed branch: $PUSHED_BRANCH"
+            if [[ "$PUSHED_BRANCH" =~ ^snapshot/main-dc-addin- ]]; then
+              ENV_NAME="APM-02 DC AddIn"
+              BASE_BRANCH="main-dc-addin"
+              TENANT_BRANCH="tenant/asint-apm-02-dc-addin"
+              LABEL_PREFIX="APM-02 DC AddIn"
+            elif [[ "$PUSHED_BRANCH" =~ ^snapshot/main-dc- ]]; then
+              ENV_NAME="APM-02 DC"
+              BASE_BRANCH="main-dc"
+              TENANT_BRANCH="tenant/asint-apm-02-dc"
+              LABEL_PREFIX="APM-02 DC"
+            else
+              ENV_NAME="APM-02"
+              BASE_BRANCH="main"
+              TENANT_BRANCH="tenant/asint-apm-02-v2"
+              LABEL_PREFIX="APM-02"
+            fi
+            RECOVERY_TYPE="code_fix"
+          elif [ "$EVENT_NAME" == "repository_dispatch" ]; then
+            DISPATCH_TYPE="${{ github.event.action }}"
+            echo "Dispatch type: $DISPATCH_TYPE"
+            if [[ "$DISPATCH_TYPE" =~ apm02_dc_addin ]]; then
+              ENV_NAME="APM-02 DC AddIn"
+              BASE_BRANCH="main-dc-addin"
+              TENANT_BRANCH="tenant/asint-apm-02-dc-addin"
+              LABEL_PREFIX="APM-02 DC AddIn"
+            elif [[ "$DISPATCH_TYPE" =~ apm02_dc ]]; then
+              ENV_NAME="APM-02 DC"
+              BASE_BRANCH="main-dc"
+              TENANT_BRANCH="tenant/asint-apm-02-dc"
+              LABEL_PREFIX="APM-02 DC"
+            else
+              ENV_NAME="APM-02"
+              BASE_BRANCH="main"
+              TENANT_BRANCH="tenant/asint-apm-02-v2"
+              LABEL_PREFIX="APM-02"
+            fi
+
+            if [[ "$DISPATCH_TYPE" =~ ^retrigger_ ]]; then
+              RECOVERY_TYPE="retrigger"
+            else
+              RECOVERY_TYPE="code_fix"
+            fi
+          fi
+
+          echo "Detected: Env=[$ENV_NAME], Base=[$BASE_BRANCH], Label=[$LABEL_PREFIX], Type=[$RECOVERY_TYPE]"
+
+          # Query open tracking PR with label "${LABEL_PREFIX} Failed"
+          FAILED_PR_JSON=$(gh pr list --repo ${{ github.repository }} --state open --limit 500 --label "${LABEL_PREFIX} Failed" --json number,headRefName,title --jq '.[0]')
+          
+          if [ -z "$FAILED_PR_JSON" ] || [ "$FAILED_PR_JSON" == "null" ]; then
+            echo "ℹ️ No open PR with label '${LABEL_PREFIX} Failed' found."
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          PR_NUMBER=$(echo "$FAILED_PR_JSON" | jq -r '.number')
+          SNAPSHOT_BRANCH=$(echo "$FAILED_PR_JSON" | jq -r '.headRefName')
+          echo "Found Failed Tracking PR: #$PR_NUMBER for branch: $SNAPSHOT_BRANCH"
+
+          if [ "$EVENT_NAME" == "push" ]; then
+            if [ "$PUSHED_BRANCH" != "$SNAPSHOT_BRANCH" ]; then
+              echo "ℹ️ Push was to a different branch than active failed snapshot. Skipping recovery."
+              echo "should_run=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "env_name=$ENV_NAME" >> $GITHUB_OUTPUT
+          echo "base_branch=$BASE_BRANCH" >> $GITHUB_OUTPUT
+          echo "tenant_branch=$TENANT_BRANCH" >> $GITHUB_OUTPUT
+          echo "label_prefix=$LABEL_PREFIX" >> $GITHUB_OUTPUT
+          echo "snapshot_branch=$SNAPSHOT_BRANCH" >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "recovery_type=$RECOVERY_TYPE" >> $GITHUB_OUTPUT
+
+  # ──────────────────────────────────────────────────────────
+  # STEP 2 — Execute Recovery & Re-deploy to Tenant
+  # ──────────────────────────────────────────────────────────
+  execute-recovery:
+    needs: guard
+    if: needs.guard.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      recovery_mode: ${{ steps.deploy.outputs.recovery_mode }}
+      status_message: ${{ steps.deploy.outputs.status_message }}
+      has_conflicts: ${{ steps.deploy.outputs.has_conflicts }}
+      has_protected_changes: ${{ steps.deploy.outputs.has_protected_changes }}
+      tenant_pr_number: ${{ steps.deploy.outputs.tenant_pr_number }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git Identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Deploy Fix or Re-Trigger Tenant
+        id: deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ENV_NAME: ${{ needs.guard.outputs.env_name }}
+          BASE_BRANCH: ${{ needs.guard.outputs.base_branch }}
+          TENANT_BRANCH: ${{ needs.guard.outputs.tenant_branch }}
+          LABEL_PREFIX: ${{ needs.guard.outputs.label_prefix }}
+        run: |
+          SNAPSHOT="${{ needs.guard.outputs.snapshot_branch }}"
+          PR_NUMBER="${{ needs.guard.outputs.pr_number }}"
+          RECOVERY_TYPE="${{ needs.guard.outputs.recovery_type }}"
+
+          echo "Initiating recovery for $ENV_NAME snapshot: $SNAPSHOT (Tracking PR: #$PR_NUMBER, Requested: $RECOVERY_TYPE)"
+
+          git fetch origin "$SNAPSHOT"
+          git fetch origin "$TENANT_BRANCH"
+
+          # Calculate new commits between tenant and snapshot
+          NEW_COMMITS=$(git rev-list --count origin/"$TENANT_BRANCH"..origin/"$SNAPSHOT" || echo "0")
+          echo "New commits on snapshot compared to $TENANT_BRANCH: $NEW_COMMITS"
+
+          if [ "$NEW_COMMITS" -gt 0 ]; then
+            echo "mode=code_fix" >> $GITHUB_OUTPUT
+            echo "🛠️ Detected $NEW_COMMITS new commit(s). Processing code fix deployment."
+
+            # Check protected files (mta.yaml, xs-security.json)
+            DIFF_FILES=$(git diff origin/"$TENANT_BRANCH"...origin/"$SNAPSHOT" --name-only || true)
+            if echo "$DIFF_FILES" | grep -qE "^(mta\.yaml|xs-security\.json)$"; then
+              echo "❌ Protected files modified. Aborting auto-merge."
+              echo "has_protected_changes=true" >> $GITHUB_OUTPUT
+              gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} --body "⚠️ **Auto-Recovery Blocked:** Protected files (\`mta.yaml\` or \`xs-security.json\`) were modified in the latest fix commit. Manual review required."
+              exit 1
+            fi
+            echo "has_protected_changes=false" >> $GITHUB_OUTPUT
+
+            # Check for existing PR from snapshot into tenant branch
+            TENANT_PR=$(gh pr list --repo ${{ github.repository }} --base "$TENANT_BRANCH" --head "$SNAPSHOT" --state open --json number --jq '.[0].number')
+            
+            if [ -z "$TENANT_PR" ] || [ "$TENANT_PR" == "null" ]; then
+              echo "Creating new PR into $TENANT_BRANCH..."
+              TENANT_PR=$(gh pr create --repo ${{ github.repository }} \
+                --base "$TENANT_BRANCH" \
+                --head "$SNAPSHOT" \
+                --title "Fix: Merging from $SNAPSHOT into $TENANT_BRANCH" \
+                --body "Automated build fix PR following SAP CI/CD failure." | grep -oE '[0-9]+$')
+              
+              if [ "${LABEL_PREFIX}" == "APM-02 DC AddIn" ]; then
+                TENANT_LABEL="auto merge for APM-02-DC-AddIn"
+              elif [ "${LABEL_PREFIX}" == "APM-02 DC" ]; then
+                TENANT_LABEL="auto merge for APM-02-DC"
+              else
+                TENANT_LABEL="auto merge for APM02"
+              fi
+              gh pr edit "$TENANT_PR" --repo ${{ github.repository }} --add-label "$TENANT_LABEL"
+              echo "Created PR #$TENANT_PR"
+            else
+              echo "Found existing open PR #$TENANT_PR"
+            fi
+
+            # Wait and check mergeability
+            for i in {1..10}; do
+              STATUS=$(gh pr view "$TENANT_PR" --repo ${{ github.repository }} --json mergeable --jq '.mergeable')
+              echo "Attempt $i: '$STATUS'"
+              if [[ "$STATUS" == "MERGEABLE" ]]; then
+                gh pr merge "$TENANT_PR" --repo ${{ github.repository }} --merge
+                echo "✅ Successfully merged $SNAPSHOT into $TENANT_BRANCH"
+                echo "has_conflicts=false" >> $GITHUB_OUTPUT
+                break
+              elif [[ "$STATUS" == "CONFLICTING" ]]; then
+                echo "❌ Merge conflict detected with $TENANT_BRANCH."
+                echo "has_conflicts=true" >> $GITHUB_OUTPUT
+                gh pr edit "$PR_NUMBER" --repo ${{ github.repository }} \
+                  --title "🟠 ${ENV_NAME} Pre-Deploy Blocked (Conflicts): Merging from $SNAPSHOT to ${BASE_BRANCH}" \
+                  --remove-label "${LABEL_PREFIX} Failed" --add-label "${LABEL_PREFIX} Pre-Deploy Blocked"
+                gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} \
+                  --body "⚠️ **Merge conflicts detected** when trying to apply build fix to \`$TENANT_BRANCH\`. Please resolve conflicts in PR #$TENANT_PR."
+                exit 1
+              fi
+              sleep 5
+            done
+
+            echo "tenant_pr_number=$TENANT_PR" >> $GITHUB_OUTPUT
+            STATUS_MSG="Build fix ($NEW_COMMITS commit(s)) merged into ${ENV_NAME}. SAP CI/CD restarted."
+
+          else
+            echo "mode=retrigger" >> $GITHUB_OUTPUT
+            echo "🔁 No new commits on snapshot. Re-triggering SAP CI/CD via empty sync commit to $TENANT_BRANCH."
+
+            git checkout "$TENANT_BRANCH"
+            git pull origin "$TENANT_BRANCH"
+            git commit --allow-empty -m "chore(trigger): re-trigger SAP CI/CD deployment on ${ENV_NAME}"
+            git push origin "$TENANT_BRANCH"
+            echo "✅ Trigger commit pushed to $TENANT_BRANCH"
+
+            LAST_TENANT_PR=$(gh pr list --repo ${{ github.repository }} --base "$TENANT_BRANCH" --head "$SNAPSHOT" --state all --json number --jq '.[0].number')
+            echo "tenant_pr_number=$LAST_TENANT_PR" >> $GITHUB_OUTPUT
+
+            STATUS_MSG="Transient retry triggered (no code changes). SAP CI/CD restarted."
+          fi
+
+          echo "status_message=$STATUS_MSG" >> $GITHUB_OUTPUT
+
+          # Update Tracking PR state back to Deploying
+          gh pr edit "$PR_NUMBER" --repo ${{ github.repository }} \
+            --title "🔵 ${ENV_NAME} Deploying: Merging from $SNAPSHOT to ${BASE_BRANCH}" \
+            --remove-label "${LABEL_PREFIX} Failed" \
+            --remove-label "${LABEL_PREFIX} Blocked" \
+            --remove-label "${LABEL_PREFIX} Pre-Deploy Blocked" \
+            --add-label "${LABEL_PREFIX} Deploying"
+
+          gh pr comment "$PR_NUMBER" --repo ${{ github.repository }} \
+            --body "🚀 **${ENV_NAME} Deployment Active:** $STATUS_MSG SAP CI/CD build is now in progress (~55-60m)."
+          
+          echo "✅ Tracking PR #$PR_NUMBER updated to '${LABEL_PREFIX} Deploying'"
+
+  # ──────────────────────────────────────────────────────────
+  # STEP 3 — Notify Teams of Re-Deployment
+  # ──────────────────────────────────────────────────────────
+  notify-success:
+    needs: [guard, execute-recovery]
+    if: always() && needs.execute-recovery.result == 'success'
+    uses: ./.github/workflows/_apm02_notify.yml
+    with:
+      env_name: ${{ needs.guard.outputs.env_name }}
+      base_branch: ${{ needs.guard.outputs.base_branch }}
+      tenant_branch: ${{ needs.guard.outputs.tenant_branch }}
+      card_title: "🔄 ${{ needs.guard.outputs.env_name }} Deployment Re-Triggered"
+      card_subtitle: ${{ needs.execute-recovery.outputs.status_message }}
+      status_text: "${{ needs.guard.outputs.env_name }} Deployment In Progress — SAP CI/CD Running (~55-60m)"
+      status_color: "good"
+      snapshot_branch: ${{ needs.guard.outputs.snapshot_branch }}
+      pr_number: ${{ needs.guard.outputs.pr_number }}
+      tenant_pr_number: ${{ needs.execute-recovery.outputs.tenant_pr_number }}
+      extra_fact_title: "Recovery Status"
+      extra_fact_value: "Pipeline restarted. Snapshot will automatically merge to ${{ needs.guard.outputs.base_branch }} upon successful completion."
+      action_label: "Review ${{ needs.guard.outputs.base_branch }} PR #${{ needs.guard.outputs.pr_number }}"
+      action_url: "https://github.com/${{ github.repository }}/pull/${{ needs.guard.outputs.pr_number }}"
+    secrets: inherit
+
+  notify-conflict:
+    needs: [guard, execute-recovery]
+    if: always() && needs.execute-recovery.result == 'failure' && needs.execute-recovery.outputs.has_conflicts == 'true'
+    uses: ./.github/workflows/_apm02_notify.yml
+    with:
+      env_name: ${{ needs.guard.outputs.env_name }}
+      base_branch: ${{ needs.guard.outputs.base_branch }}
+      tenant_branch: ${{ needs.guard.outputs.tenant_branch }}
+      card_title: "⚠️ ${{ needs.guard.outputs.env_name }} Fix Blocked: Merge Conflicts"
+      card_subtitle: "A merge conflict occurred while trying to apply the build fix to ${{ needs.guard.outputs.tenant_branch }}."
+      status_text: "Deployment blocked due to merge conflicts."
+      status_color: "attention"
+      snapshot_branch: ${{ needs.guard.outputs.snapshot_branch }}
+      pr_number: ${{ needs.guard.outputs.pr_number }}
+      tenant_pr_number: ${{ needs.execute-recovery.outputs.tenant_pr_number }}
+      extra_fact_title: "Action Required"
+      extra_fact_value: "Resolve conflicts with ${{ needs.guard.outputs.tenant_branch }} to resume deployment."
+      action_label: "Review ${{ needs.guard.outputs.base_branch }} PR #${{ needs.guard.outputs.pr_number }}"
+      action_url: "https://github.com/${{ github.repository }}/pull/${{ needs.guard.outputs.pr_number }}"
+    secrets: inherit

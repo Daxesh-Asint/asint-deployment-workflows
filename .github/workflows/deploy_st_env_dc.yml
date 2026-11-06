@@ -1,0 +1,18 @@
+﻿name: "Deploy: ST-ENV DC"
+
+on:
+  repository_dispatch:
+    types: [trigger_st_env_dc_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "tenant/asint-st-env-dc"
+      compare: "dev"
+      deployment_name: "ST-ENV DC"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+    secrets: inherit

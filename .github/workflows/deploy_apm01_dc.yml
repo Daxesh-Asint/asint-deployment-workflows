@@ -1,0 +1,18 @@
+﻿name: "Deploy: APM-01 DC"
+
+on:
+  repository_dispatch:
+    types: [trigger_apm01_dc_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "tenant/asint-apm-01-dc"
+      compare: "main-dc"
+      deployment_name: "APM-01 DC"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+    secrets: inherit

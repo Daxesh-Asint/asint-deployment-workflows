@@ -1,0 +1,366 @@
+﻿name: "SAP CI/CD: Notification Service"
+
+on:
+  repository_dispatch:
+    types: [sap_cicd_started, sap_cicd_finished]
+  workflow_dispatch:
+    inputs:
+      event_type:
+        description: "Event Type"
+        required: true
+        type: choice
+        options:
+          - sap_cicd_started
+          - sap_cicd_finished
+        default: sap_cicd_started
+      status:
+        description: "Status / Severity"
+        required: true
+        type: choice
+        options:
+          - INFO
+          - SUCCESS
+          - ERROR
+          - FATAL
+        default: INFO
+      resource_name:
+        description: "SAP CI/CD Resource / Job Name"
+        required: true
+        type: choice
+        options:
+          # ── 1. Core Module Jobs ───────────────────────────
+          # 1.
+          - "AsInt-AIS-02"
+          # 2.
+          - "AsInt-APM-01"
+          # 3.
+          - "AsInt-APM-02"
+          # 4.
+          - "AsInt-APM-EIOT"
+          # 5.
+          - "AsInt-DEMO"
+          # 6.
+          - "AsInt-IRC"
+          - "IRC"
+          # 7.
+          - "AsInt-ST"
+          # 8.
+          - "BAYSTAR"
+          - "Baystar"
+          # 9.
+          - "Hemlock-NON-PROD"
+          # 10.
+          - "Hemlock-PROD"
+          # 11.
+          - "Indorama-PROD-900"
+          # 12.
+          - "Indorama-PROD-933"
+          # 13.
+          - "Indorama-QA-233"
+          # 14.
+          - "Indorama-QA-234"
+          # 15.
+          - "VMOS"
+
+          # ── 2. DC Module Jobs ─────────────────────────────
+          # 1.
+          - "AsInt-AIS-02-DC"
+          # 2.
+          - "AsInt-APM-01-DC"
+          # 3.
+          - "AsInt-APM-02-DC"
+          # 4.
+          - "AsInt-APM-EIOT-DC"
+          # 5.
+          - "AsInt-DEMO-DC"
+          # 6.
+          - "IRC-DC"
+          # 7.
+          - "AsInt-ST-DC"
+          # 8.
+          - "Baystar-DC"
+          # 9.
+          - "Hemlock-NON-PROD-DC"
+          # 10.
+          - "Hemlock-PROD-DC"
+          # 11.
+          - "Indorama-PROD-900-DC"
+          # 12.
+          - "Indorama-PROD-933-DC"
+          # 13.
+          - "Indorama-QA-233-DC"
+          # 14.
+          - "Indorama-QA-234-DC"
+          # 15.
+          - "VMOS-DC"
+
+          # ── 3. DC AddIn Module Jobs ───────────────────────
+          # 1.
+          - "AsInt-AIS-02-DC-AddIn"
+          # 2.
+          - "AsInt-APM-01-DC-AddIn"
+          # 3.
+          - "AsInt-APM-02-DC-AddIn"
+          # 4.
+          - "AsInt-APM-EIOT-DC-AddIn"
+          # 5.
+          - "AsInt-DEMO-DC-AddIn"
+          # 6.
+          - "IRC-DC-AddIn"
+          # 7.
+          - "AsInt-ST-DC-AddIn"
+          # 8.
+          - "Baystar-DC-AddIn"
+          # 9.
+          - "Hemlock-NON-PROD-DC-AddIn"
+          # 10.
+          - "Hemlock-PROD-DC-AddIn"
+          # 11.
+          - "Indorama-PROD-900-DC-AddIn"
+          # 12.
+          - "Indorama-PROD-933-DC-AddIn"
+          # 13.
+          - "Indorama-QA-233-DC-AddIn"
+          # 14.
+          - "Indorama-QA-234-DC-AddIn"
+          # 15.
+          - "VMOS-DC-AddIn"
+        default: "AsInt-AIS-02"
+      subject:
+        description: "Subject / Description"
+        required: false
+        default: "Build execution triggered in SAP CI/CD"
+      commit_id:
+        description: "Git Commit ID (optional)"
+        required: false
+        default: ""
+      app_name:
+        description: "CF App Name (optional, defaults to repo var or mapped app)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    outputs:
+      event_type: ${{ steps.process.outputs.event_type }}
+      resource_name: ${{ steps.process.outputs.resource_name }}
+      cf_app_name: ${{ steps.process.outputs.cf_app_name }}
+      commit_id: ${{ steps.process.outputs.commit_id }}
+      status: ${{ steps.process.outputs.status }}
+      clean_name: ${{ steps.process.outputs.clean_name }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Process SAP CI/CD Event and Send MS Teams Notification
+        id: process
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CF_USERNAME: ${{ secrets.CF_USERNAME }}
+          CF_PASSWORD: ${{ secrets.CF_PASSWORD }}
+          CLIENT_PAYLOAD_JSON: ${{ toJson(github.event.client_payload) }}
+          EVENT_TYPE: ${{ github.event.action }}
+          INPUT_EVENT_TYPE: ${{ github.event.inputs.event_type }}
+          RESOURCE_NAME: ${{ github.event.client_payload.resource_name }}
+          INPUT_RESOURCE_NAME: ${{ github.event.inputs.resource_name }}
+          PAYLOAD_STATUS: ${{ github.event.client_payload.status }}
+          INPUT_STATUS: ${{ github.event.inputs.status }}
+          PAYLOAD_SUBJECT: ${{ github.event.client_payload.subject }}
+          INPUT_SUBJECT: ${{ github.event.inputs.subject }}
+          PAYLOAD_BODY: ${{ github.event.client_payload.body }}
+          PAYLOAD_CATEGORY: ${{ github.event.client_payload.category }}
+          PAYLOAD_COMMIT_ID: ${{ github.event.client_payload.commit_id }}
+          PAYLOAD_COMMIT: ${{ github.event.client_payload.commit }}
+          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
+          INPUT_COMMIT_ID: ${{ github.event.inputs.commit_id }}
+          PAYLOAD_TAGS: ${{ github.event.client_payload.tags }}
+          PAYLOAD_APP_NAME: ${{ github.event.client_payload.app_name }}
+          INPUT_APP_NAME: ${{ github.event.inputs.app_name }}
+          TEAMS_WEBHOOK_AIS02_1: ${{ secrets.TEAMS_WEBHOOK_AIS02_1 }}
+          TEAMS_WEBHOOK_AIS02_2: ${{ secrets.TEAMS_WEBHOOK_AIS02_2 }}
+          TEAMS_WEBHOOK_AIS02_3: ${{ secrets.TEAMS_WEBHOOK_AIS02_3 }}
+          TEAMS_WEBHOOK_APM01_1: ${{ secrets.TEAMS_WEBHOOK_APM01_1 }}
+          TEAMS_WEBHOOK_APM01_2: ${{ secrets.TEAMS_WEBHOOK_APM01_2 }}
+          TEAMS_WEBHOOK_APM01_3: ${{ secrets.TEAMS_WEBHOOK_APM01_3 }}
+          TEAMS_WEBHOOK_APM02_1: ${{ secrets.TEAMS_WEBHOOK_APM02_1 }}
+          TEAMS_WEBHOOK_APM02_2: ${{ secrets.TEAMS_WEBHOOK_APM02_2 }}
+          TEAMS_WEBHOOK_APM02_3: ${{ secrets.TEAMS_WEBHOOK_APM02_3 }}
+          TEAMS_WEBHOOK_APMEIOT_1: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_1 }}
+          TEAMS_WEBHOOK_APMEIOT_2: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_2 }}
+          TEAMS_WEBHOOK_APMEIOT_3: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_3 }}
+          TEAMS_WEBHOOK_DEMO_1: ${{ secrets.TEAMS_WEBHOOK_DEMO_1 }}
+          TEAMS_WEBHOOK_DEMO_2: ${{ secrets.TEAMS_WEBHOOK_DEMO_2 }}
+          TEAMS_WEBHOOK_DEMO_3: ${{ secrets.TEAMS_WEBHOOK_DEMO_3 }}
+          TEAMS_WEBHOOK_BAYSTAR_1: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_1 }}
+          TEAMS_WEBHOOK_BAYSTAR_2: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_2 }}
+          TEAMS_WEBHOOK_BAYSTAR_3: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_3 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_1: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_1 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_2: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_2 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_3: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_3 }}
+          TEAMS_WEBHOOK_HSC_PROD_1: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_1 }}
+          TEAMS_WEBHOOK_HSC_PROD_2: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_2 }}
+          TEAMS_WEBHOOK_HSC_PROD_3: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_3 }}
+          TEAMS_WEBHOOK_IRC_1: ${{ secrets.TEAMS_WEBHOOK_IRC_1 }}
+          TEAMS_WEBHOOK_IRC_2: ${{ secrets.TEAMS_WEBHOOK_IRC_2 }}
+          TEAMS_WEBHOOK_IRC_3: ${{ secrets.TEAMS_WEBHOOK_IRC_3 }}
+          TEAMS_WEBHOOK_ST_ENV_1: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_1 }}
+          TEAMS_WEBHOOK_ST_ENV_2: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_2 }}
+          TEAMS_WEBHOOK_ST_ENV_3: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_3 }}
+          TEAMS_WEBHOOK_VMOS_1: ${{ secrets.TEAMS_WEBHOOK_VMOS_1 }}
+          TEAMS_WEBHOOK_VMOS_2: ${{ secrets.TEAMS_WEBHOOK_VMOS_2 }}
+          TEAMS_WEBHOOK_VMOS_3: ${{ secrets.TEAMS_WEBHOOK_VMOS_3 }}
+          TEAMS_WEBHOOK_AIS02_DC_1: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_1 }}
+          TEAMS_WEBHOOK_AIS02_DC_2: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_2 }}
+          TEAMS_WEBHOOK_AIS02_DC_3: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_3 }}
+          TEAMS_WEBHOOK_APM02_DC_1: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_1 }}
+          TEAMS_WEBHOOK_APM02_DC_2: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_2 }}
+          TEAMS_WEBHOOK_APM02_DC_3: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_3 }}
+          TEAMS_WEBHOOK_APM02_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_APM02_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_APM02_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_AIS02_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_AIS02_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_AIS02_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_1: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_1 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_2: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_2 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_3: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_3 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_DEMO_DC_1: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_1 }}
+          TEAMS_WEBHOOK_DEMO_DC_2: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_2 }}
+          TEAMS_WEBHOOK_DEMO_DC_3: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_3 }}
+          TEAMS_WEBHOOK_DEMO_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_DEMO_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_DEMO_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_1: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_1 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_2: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_2 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_3: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_3 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_1: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_1 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_2: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_2 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_3: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_3 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_1: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_1 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_2: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_2 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_3: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_3 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_IRC_DC_1: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_1 }}
+          TEAMS_WEBHOOK_IRC_DC_2: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_2 }}
+          TEAMS_WEBHOOK_IRC_DC_3: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_3 }}
+          TEAMS_WEBHOOK_IRC_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_IRC_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_IRC_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_1: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_1 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_2: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_2 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_3: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_3 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_VMOS_DC_1: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_1 }}
+          TEAMS_WEBHOOK_VMOS_DC_2: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_2 }}
+          TEAMS_WEBHOOK_VMOS_DC_3: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_3 }}
+          TEAMS_WEBHOOK_VMOS_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_VMOS_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_VMOS_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_GLOBAL_1: ${{ secrets.TEAMS_WEBHOOK_GLOBAL_1 }}
+          TEAMS_WEBHOOK_GLOBAL_2: ${{ secrets.TEAMS_WEBHOOK_GLOBAL_2 }}
+          TEAMS_WEBHOOK_GLOBAL_3: ${{ secrets.TEAMS_WEBHOOK_GLOBAL_3 }}
+        run: |
+          chmod +x .github/scripts/notify_sap_event.sh
+          ./.github/scripts/notify_sap_event.sh
+
+      # ──────────────────────────────────────────────────────────
+      # 📖 Global Wiki Deployment History Update
+      # ──────────────────────────────────────────────────────────
+      - name: Checkout Wiki
+        if: always()
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN || github.token }}
+
+      - name: Setup Node.js for Wiki
+        if: always()
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Update Global Wiki Deployment History (SAP Event)
+        if: always()
+        run: |
+          if [ -d "wiki" ] && [ -n "${{ steps.process.outputs.resource_name }}" ]; then
+            EVENT_ACT="${{ steps.process.outputs.event_type }}"
+            WIKI_ACT="sap_finish"
+            if [ "$EVENT_ACT" = "sap_cicd_started" ]; then
+              WIKI_ACT="sap_start"
+            fi
+
+            export WIKI_PAYLOAD=$(jq -n \
+              --arg env "${{ steps.process.outputs.clean_name || steps.process.outputs.resource_name }}" \
+              --arg action "$WIKI_ACT" \
+              --arg commit "${{ steps.process.outputs.commit_id }}" \
+              --arg status "${{ steps.process.outputs.status }}" \
+              '{
+                environment: $env,
+                action: $action,
+                commit_id: $commit,
+                status: $status
+              }')
+
+            node .github/scripts/update_wiki_global.js || echo "Global wiki update warning: script finished with error"
+          else
+            echo "Skipping wiki update: Wiki dir or resource_name not available."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN || github.token }}
+

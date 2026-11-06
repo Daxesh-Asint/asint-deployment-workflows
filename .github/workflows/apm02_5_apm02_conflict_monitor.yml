@@ -1,0 +1,184 @@
+﻿name: "APM-02 Family: Guard - Pre-Deploy Conflicts"
+
+on:
+  pull_request:
+    branches:
+      - "tenant/asint-apm-02-v2"
+      - "tenant/asint-apm-02-dc"
+      - "tenant/asint-apm-02-dc-addin"
+    types: [synchronize, closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  check-env:
+    runs-on: ubuntu-latest
+    outputs:
+      is_target: ${{ steps.detect.outputs.is_target }}
+      env_name: ${{ steps.detect.outputs.env_name }}
+      base_branch: ${{ steps.detect.outputs.base_branch }}
+      tenant_branch: ${{ steps.detect.outputs.tenant_branch }}
+      label_prefix: ${{ steps.detect.outputs.label_prefix }}
+    steps:
+      - name: Detect Environment from PR Base and Labels
+        id: detect
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          LABELS='${{ toJSON(github.event.pull_request.labels.*.name) }}'
+          ACTION="${{ github.event.action }}"
+          IS_MERGED="${{ github.event.pull_request.merged }}"
+
+          echo "Base Ref: $BASE_REF, Head Ref: $HEAD_REF"
+          echo "Labels: $LABELS"
+          echo "Action: $ACTION, Merged: $IS_MERGED"
+
+          if [[ "$BASE_REF" == "tenant/asint-apm-02-dc-addin" ]] && [[ "$HEAD_REF" =~ ^snapshot/main-dc-addin- ]]; then
+            echo "is_target=true" >> $GITHUB_OUTPUT
+            echo "env_name=APM-02 DC AddIn" >> $GITHUB_OUTPUT
+            echo "base_branch=main-dc-addin" >> $GITHUB_OUTPUT
+            echo "tenant_branch=tenant/asint-apm-02-dc-addin" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02 DC AddIn" >> $GITHUB_OUTPUT
+          elif [[ "$BASE_REF" == "tenant/asint-apm-02-dc" ]] && [[ "$HEAD_REF" =~ ^snapshot/main-dc- ]]; then
+            echo "is_target=true" >> $GITHUB_OUTPUT
+            echo "env_name=APM-02 DC" >> $GITHUB_OUTPUT
+            echo "base_branch=main-dc" >> $GITHUB_OUTPUT
+            echo "tenant_branch=tenant/asint-apm-02-dc" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02 DC" >> $GITHUB_OUTPUT
+          elif [[ "$BASE_REF" == "tenant/asint-apm-02-v2" ]] && ([[ "$HEAD_REF" =~ ^snapshot/main- ]] && ! [[ "$HEAD_REF" =~ ^snapshot/main-dc ]]); then
+            echo "is_target=true" >> $GITHUB_OUTPUT
+            echo "env_name=APM-02" >> $GITHUB_OUTPUT
+            echo "base_branch=main" >> $GITHUB_OUTPUT
+            echo "tenant_branch=tenant/asint-apm-02-v2" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02" >> $GITHUB_OUTPUT
+          else
+            echo "is_target=false" >> $GITHUB_OUTPUT
+            echo "Not a monitored pre-deploy conflict PR. Skipping."
+          fi
+
+  auto-merge-apm02:
+    needs: check-env
+    if: needs.check-env.outputs.is_target == 'true' && github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Mergeability Check
+        run: sleep 10 # Give GitHub time to compute mergeability
+
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Check Mergeability and Auto-Merge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Wait up to 60 seconds for mergeable state to be determined
+          for i in {1..12}; do
+            MERGEABLE=$(gh pr view "$PR_NUMBER" --repo ${{ github.repository }} --json mergeable -q .mergeable)
+            if [ "$MERGEABLE" == "UNKNOWN" ]; then
+              echo "Mergeable state is UNKNOWN. Waiting..."
+              sleep 5
+            else
+              break
+            fi
+          done
+
+          echo "Final mergeable state: $MERGEABLE"
+          
+          if [ "$MERGEABLE" == "MERGEABLE" ]; then
+            echo "✅ Conflicts have been resolved! PR is now mergeable."
+            
+            echo "Attempting to auto-merge..."
+            gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --merge --auto 2>/dev/null || \
+            gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --merge --admin 2>/dev/null || \
+            gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --merge
+            echo "✅ PR successfully merged."
+          else
+            echo "⚠️ PR is still not mergeable. Conflicts remain or checks are failing."
+          fi
+
+  post-merge-actions:
+    needs: [check-env, auto-merge-apm02]
+    if: always() && needs.check-env.outputs.is_target == 'true' && (
+          (needs.auto-merge-apm02.result == 'success' && github.event.action == 'synchronize') || 
+          (github.event.action == 'closed' && github.event.pull_request.merged == true)
+        )
+    runs-on: ubuntu-latest
+    outputs:
+      main_pr_number: ${{ steps.update_pr.outputs.main_pr_number }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Update Main/Base PR Status
+        id: update_pr
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SNAPSHOT: ${{ github.event.pull_request.head.ref }}
+          ENV_NAME: ${{ needs.check-env.outputs.env_name }}
+          BASE_BRANCH: ${{ needs.check-env.outputs.base_branch }}
+          LABEL_PREFIX: ${{ needs.check-env.outputs.label_prefix }}
+        run: |
+          ACTIVE_PR=$(gh pr list --repo ${{ github.repository }} --state open --limit 500 --base "$BASE_BRANCH" --json number,headRefName --jq ".[] | select(.headRefName == \"$SNAPSHOT\") | .number" | head -n 1)
+          if [ -n "$ACTIVE_PR" ] && [ "$ACTIVE_PR" != "null" ]; then
+            gh pr edit "$ACTIVE_PR" --repo ${{ github.repository }} --title "🟡 ${ENV_NAME} Deploying: Merging from $SNAPSHOT to ${BASE_BRANCH}" --add-label "${LABEL_PREFIX} Deploying"
+            gh pr edit "$ACTIVE_PR" --repo ${{ github.repository }} --remove-label "${LABEL_PREFIX} Pre-Deploy Blocked" 2>/dev/null || true
+            echo "✅ Main/Base PR updated to ${LABEL_PREFIX} Deploying."
+            echo "main_pr_number=$ACTIVE_PR" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ No open Tracking PR found on $BASE_BRANCH for snapshot $SNAPSHOT."
+          fi
+
+      - name: Checkout Wiki
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+          token: ${{ github.token }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Update Wiki (Merged Tenant)
+        run: |
+          MERGE_TIME=$(TZ='Asia/Kolkata' date +'%H:%M IST')
+          export WIKI_PAYLOAD="{\"action\": \"merged-apm02\", \"environment\": \"${{ needs.check-env.outputs.env_name }}\", \"snapshot\": \"${{ github.event.pull_request.head.ref }}\", \"success\": true, \"pr_number\": \"${{ github.event.pull_request.number }}\", \"merge_time\": \"$MERGE_TIME\"}"
+          
+          if [ -d "wiki" ]; then
+            node .github/scripts/update_wiki.js || echo "Wiki update failed"
+          else
+            echo "Wiki repo not found, skipping."
+          fi
+
+  notify-apm02-merged:
+    needs: [check-env, auto-merge-apm02, post-merge-actions]
+    if: always() && needs.check-env.outputs.is_target == 'true' && (
+          (needs.auto-merge-apm02.result == 'success' && github.event.action == 'synchronize') || 
+          (github.event.action == 'closed' && github.event.pull_request.merged == true)
+        )
+    uses: ./.github/workflows/_apm02_notify.yml
+    with:
+      env_name: ${{ needs.check-env.outputs.env_name }}
+      base_branch: ${{ needs.check-env.outputs.base_branch }}
+      tenant_branch: ${{ needs.check-env.outputs.tenant_branch }}
+      card_title: "✅ Merge Conflicts Resolved and automation process resumed."
+      card_subtitle: "Merge conflicts were resolved and snapshot merged into ${{ needs.check-env.outputs.tenant_branch }}. SAP CI/CD deployment has started automatically. Deployment takes approximately 55-60 minutes."
+      status_text: "Snapshot successfully merged into ${{ needs.check-env.outputs.env_name }} tenant branch. - SAP CI/CD Triggered."
+      status_color: "good"
+      snapshot_branch: ${{ github.event.pull_request.head.ref }}
+      pr_number: ${{ needs.post-merge-actions.outputs.main_pr_number }}
+      tenant_pr_number: ${{ github.event.pull_request.number }}
+      extra_fact_title: "⚠️ Snapshot Closed"
+      extra_fact_value: "This snapshot is now closed for cherry-picks. The final merge to ${{ needs.check-env.outputs.base_branch }} will happen automatically via a webhook when SAP CI/CD finishes."
+      action_label: "Review ${{ needs.check-env.outputs.base_branch }} PR #${{ needs.post-merge-actions.outputs.main_pr_number }}"
+      action_url: "https://github.com/${{ github.repository }}/pull/${{ needs.post-merge-actions.outputs.main_pr_number }}"
+    secrets: inherit

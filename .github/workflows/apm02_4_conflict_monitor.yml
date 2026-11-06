@@ -1,0 +1,192 @@
+﻿name: "APM-02 Family: Guard - Base PR Conflicts"
+
+on:
+  pull_request:
+    branches:
+      - main
+      - main-dc
+      - main-dc-addin
+    types: [synchronize, closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  check-env:
+    runs-on: ubuntu-latest
+    outputs:
+      is_target: ${{ steps.detect.outputs.is_target }}
+      env_name: ${{ steps.detect.outputs.env_name }}
+      base_branch: ${{ steps.detect.outputs.base_branch }}
+      label_prefix: ${{ steps.detect.outputs.label_prefix }}
+    steps:
+      - name: Detect Environment from PR Base and Labels
+        id: detect
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          LABELS='${{ toJSON(github.event.pull_request.labels.*.name) }}'
+          ACTION="${{ github.event.action }}"
+          IS_MERGED="${{ github.event.pull_request.merged }}"
+
+          echo "Base Ref: $BASE_REF, Head Ref: $HEAD_REF"
+          echo "Labels: $LABELS"
+          echo "Action: $ACTION, Merged: $IS_MERGED"
+
+          if [[ "$BASE_REF" == "main-dc-addin" ]] && [[ "$HEAD_REF" =~ ^snapshot/main-dc-addin- ]] && echo "$LABELS" | grep -qE '"APM-02 DC AddIn Blocked"|"APM-02 DC AddIn Blocked \(Conflicts\)'; then
+            echo "is_target=true" >> $GITHUB_OUTPUT
+            echo "env_name=APM-02 DC AddIn" >> $GITHUB_OUTPUT
+            echo "base_branch=main-dc-addin" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02 DC AddIn" >> $GITHUB_OUTPUT
+          elif [[ "$BASE_REF" == "main-dc" ]] && [[ "$HEAD_REF" =~ ^snapshot/main-dc- ]] && echo "$LABELS" | grep -qE '"APM-02 DC Blocked"|"APM-02 DC Blocked \(Conflicts\)'; then
+            echo "is_target=true" >> $GITHUB_OUTPUT
+            echo "env_name=APM-02 DC" >> $GITHUB_OUTPUT
+            echo "base_branch=main-dc" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02 DC" >> $GITHUB_OUTPUT
+          elif [[ "$BASE_REF" == "main" ]] && ([[ "$HEAD_REF" =~ ^snapshot/main- ]] && ! [[ "$HEAD_REF" =~ ^snapshot/main-dc ]]) && echo "$LABELS" | grep -qE '"APM-02 Blocked"|"APM-02 Blocked \(Conflicts\)'; then
+            echo "is_target=true" >> $GITHUB_OUTPUT
+            echo "env_name=APM-02" >> $GITHUB_OUTPUT
+            echo "base_branch=main" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02" >> $GITHUB_OUTPUT
+          else
+            echo "is_target=false" >> $GITHUB_OUTPUT
+            echo "Not a monitored conflict PR. Skipping."
+          fi
+
+  auto-merge-resolved:
+    needs: check-env
+    if: needs.check-env.outputs.is_target == 'true' && github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Mergeability Check
+        run: sleep 10 # Give GitHub time to compute mergeability
+
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Check Mergeability and Auto-Merge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ENV_NAME: ${{ needs.check-env.outputs.env_name }}
+          BASE_BRANCH: ${{ needs.check-env.outputs.base_branch }}
+          LABEL_PREFIX: ${{ needs.check-env.outputs.label_prefix }}
+        run: |
+          # Wait up to 60 seconds for mergeable state to be determined
+          for i in {1..12}; do
+            MERGEABLE=$(gh pr view "$PR_NUMBER" --repo ${{ github.repository }} --json mergeable -q .mergeable)
+            if [ "$MERGEABLE" == "UNKNOWN" ]; then
+              echo "Mergeable state is UNKNOWN. Waiting (attempt $i/12)..."
+              sleep 5
+            else
+              break
+            fi
+          done
+
+          echo "Final mergeable state: $MERGEABLE"
+          
+          if [ "$MERGEABLE" == "MERGEABLE" ]; then
+            echo "✅ Conflicts have been resolved! PR is now mergeable."
+            
+            # Update labels
+            gh pr edit "$PR_NUMBER" --repo ${{ github.repository }} \
+              --title "🟢 ${ENV_NAME} Blocked (Conflicts Resolved): Merging from ${{ github.event.pull_request.head.ref }} to ${BASE_BRANCH}" \
+              --remove-label "${LABEL_PREFIX} Blocked" 2>/dev/null || true
+            gh pr edit "$PR_NUMBER" --repo ${{ github.repository }} \
+              --add-label "${LABEL_PREFIX} Blocked (Conflicts Resolved)" 2>/dev/null || true
+              
+            echo "Marking PR as ready (in case it is a draft)..."
+            gh pr ready "$PR_NUMBER" --repo ${{ github.repository }} 2>/dev/null || true
+              
+            echo "Attempting to auto-merge..."
+            gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --merge --auto 2>/dev/null || \
+            gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --merge --admin 2>/dev/null || \
+            gh pr merge "$PR_NUMBER" --repo ${{ github.repository }} --merge
+            echo "✅ PR successfully merged."
+          else
+            echo "⚠️ PR is still not mergeable. Conflicts remain or checks are failing."
+          fi
+
+  notify-and-update-wiki:
+    needs: [check-env, auto-merge-resolved]
+    if: always() && needs.check-env.outputs.is_target == 'true' && (
+          (needs.auto-merge-resolved.result == 'success' && github.event.action == 'synchronize') || 
+          (github.event.action == 'closed' && github.event.pull_request.merged == true)
+        )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Checkout Wiki
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+          token: ${{ github.token }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Update Wiki (Post-Conflict)
+        run: |
+          if [ -d "wiki" ]; then
+            node .github/scripts/update_wiki.js || echo "Wiki update failed"
+          else
+            echo "Wiki repo not found, skipping."
+          fi
+        env:
+          WIKI_PAYLOAD: '{"action": "post-conflict", "environment": "${{ needs.check-env.outputs.env_name }}", "snapshot": "${{ github.event.pull_request.head.ref }}"}'
+
+  notify-success:
+    needs: [check-env, auto-merge-resolved, notify-and-update-wiki]
+    if: always() && needs.check-env.outputs.is_target == 'true' && (
+          (needs.auto-merge-resolved.result == 'success' && github.event.action == 'synchronize') || 
+          (github.event.action == 'closed' && github.event.pull_request.merged == true)
+        )
+    uses: ./.github/workflows/_apm02_notify.yml
+    with:
+      env_name: ${{ needs.check-env.outputs.env_name }}
+      base_branch: ${{ needs.check-env.outputs.base_branch }}
+      card_title: "✅ ${{ needs.check-env.outputs.env_name }} Deployment Cycle Complete (Conflicts Resolved)"
+      card_subtitle: "Merge conflicts were resolved and PR #${{ github.event.pull_request.number }} was successfully merged into ${{ needs.check-env.outputs.base_branch }}. Snapshot branch deleted."
+      status_text: "✅ Deployment & Merge Complete"
+      status_color: "good"
+      snapshot_branch: "${{ github.event.pull_request.head.ref }} (Deleted 🗑️)"
+      pr_number: ${{ github.event.pull_request.number }}
+      extra_fact_title: "Cycle State"
+      extra_fact_value: "Reset to IDLE. Snapshot branch deleted."
+      action_label: "Review ${{ needs.check-env.outputs.base_branch }} PR #${{ github.event.pull_request.number }}"
+      action_url: "https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+    secrets: inherit
+
+  delete-snapshot-branch:
+    needs: [check-env, auto-merge-resolved, notify-and-update-wiki, notify-success]
+    if: always() && needs.check-env.outputs.is_target == 'true' && needs.notify-success.result == 'success' && (needs.auto-merge-resolved.result == 'success' || github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete Remote Snapshot Branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SNAPSHOT="${{ github.event.pull_request.head.ref }}"
+          echo "Target snapshot branch: [$SNAPSHOT]"
+          
+          # Safety check: branch must strictly match snapshot/main-
+          if [[ "$SNAPSHOT" =~ ^snapshot/main- ]]; then
+            echo "🗑️ Deleting remote snapshot branch $SNAPSHOT via GitHub API..."
+            gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$SNAPSHOT" || echo "Branch $SNAPSHOT might already be deleted."
+            echo "✅ Remote snapshot branch $SNAPSHOT deleted successfully."
+          else
+            echo "⚠️ Safety guard: '$SNAPSHOT' does not match snapshot/main-*. Skipping deletion."
+          fi

@@ -1,0 +1,18 @@
+﻿name: "Deploy: ST-ENV"
+
+on:
+  repository_dispatch:
+    types: [trigger_st_env_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "st-env-for-contentfederation"
+      compare: "dev"
+      deployment_name: "ST-ENV"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+    secrets: inherit

@@ -1,0 +1,18 @@
+﻿name: "Deploy: HSC Non-Prod DC"
+
+on:
+  repository_dispatch:
+    types: [trigger_hsc_non_prod_dc_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "tenant/hemlock-non-prod-dc"
+      compare: "main-dc"
+      deployment_name: "HSC Non-Prod DC"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+    secrets: inherit

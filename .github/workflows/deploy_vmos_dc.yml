@@ -1,0 +1,18 @@
+﻿name: "Deploy: VMOS DC"
+
+on:
+  repository_dispatch:
+    types: [trigger_vmos_dc_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "tenant/vmos-dc"
+      compare: "main-dc"
+      deployment_name: "VMOS DC"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+    secrets: inherit

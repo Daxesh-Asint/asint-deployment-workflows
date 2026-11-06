@@ -1,0 +1,100 @@
+﻿name: "Cloud Foundry App Control Engine"
+
+on:
+  workflow_call:
+    inputs:
+      api_endpoint:
+        required: false
+        type: string
+        default: "https://api.cf.eu10-004.hana.ondemand.com"
+      org:
+        required: false
+        type: string
+        default: "ais-provider-eu10-cf"
+      space:
+        required: false
+        type: string
+        default: "main"
+      app_name:
+        required: true
+        type: string
+      action:
+        required: true
+        type: string # 'stop', 'start', or 'status'
+    outputs:
+      result_status:
+        description: "Status of the app after execution"
+        value: ${{ jobs.cf_execute.outputs.app_status }}
+
+jobs:
+  cf_execute:
+    runs-on: ubuntu-latest
+    outputs:
+      app_status: ${{ steps.action.outputs.app_status }}
+    steps:
+      - name: Install Cloud Foundry CLI
+        run: |
+          wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
+          echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
+          sudo apt-get update -qq
+          sudo apt-get install -y cf8-cli
+          cf version
+
+      - name: Log in to Cloud Foundry
+        env:
+          CF_USERNAME: ${{ secrets.CF_USERNAME }}
+          CF_PASSWORD: ${{ secrets.CF_PASSWORD }}
+        run: |
+          if [ -z "$CF_USERNAME" ] || [ -z "$CF_PASSWORD" ]; then
+            echo "❌ ERROR: CF_USERNAME or CF_PASSWORD secrets are missing in repository settings."
+            exit 1
+          fi
+
+          echo "Authenticating with Cloud Foundry API at ${{ inputs.api_endpoint }}..."
+          cf login -a "${{ inputs.api_endpoint }}" \
+                   -u "$CF_USERNAME" \
+                   -p "$CF_PASSWORD"
+
+          echo "=== Available Organizations for this user ==="
+          cf orgs
+
+          TARGET_ORG="${{ inputs.org }}"
+          echo "Attempting to target Org: [$TARGET_ORG], Space: [${{ inputs.space }}]..."
+
+          if ! cf target -o "$TARGET_ORG" -s "${{ inputs.space }}"; then
+            echo "⚠️ Direct target by name failed. Listing all available orgs and attempting fallback..."
+            # Try targeting using the Org GUID from BTP cockpit if known
+            cf target -o "fdf52ab7-15d3-4d9a-b839-e479b1671808" -s "${{ inputs.space }}" || true
+          fi
+
+          echo "✅ CF target status:"
+          cf target
+
+      - name: Execute App Action (${{ inputs.action }})
+        id: action
+        run: |
+          APP="${{ inputs.app_name }}"
+          ACTION="${{ inputs.action }}"
+
+          echo "Target App: $APP"
+          echo "Action: $ACTION"
+
+          if [ "$ACTION" = "stop" ]; then
+            echo "🛑 Stopping app $APP to free memory quota..."
+            cf stop "$APP"
+            echo "App stopped successfully."
+          elif [ "$ACTION" = "start" ]; then
+            echo "▶️ Starting app $APP..."
+            cf start "$APP"
+            echo "App started successfully."
+          elif [ "$ACTION" = "status" ]; then
+            echo "ℹ️ Checking status of $APP..."
+            cf app "$APP"
+          else
+            echo "❌ Unknown action: $ACTION"
+            exit 1
+          fi
+
+          CURRENT_STATE=$(cf app "$APP" | grep -i "requested state:" | awk '{print $3}')
+          echo "Current requested state: [$CURRENT_STATE]"
+          echo "app_status=$CURRENT_STATE" >> $GITHUB_OUTPUT

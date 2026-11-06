@@ -1,0 +1,134 @@
+﻿name: "APM-02 Family: 2. Extend Wait Window"
+
+# An admin triggers this during the waiting window to give developers more (or less) time.
+# This workflow adjusts the requested duration, then notifies the channel.
+
+on:
+  repository_dispatch:
+    types: 
+      - adjust_apm02_wait
+      - adjust_apm02_dc_wait
+      - adjust_apm02_dc_addin_wait
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Guard: only allow extension if a snapshot is active
+  # ─────────────────────────────────────────────
+  guard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      env_name: ${{ steps.detect.outputs.env_name }}
+      base_branch: ${{ steps.detect.outputs.base_branch }}
+      tenant_branch: ${{ steps.detect.outputs.tenant_branch }}
+      label_prefix: ${{ steps.detect.outputs.label_prefix }}
+      active_snapshot: ${{ steps.check.outputs.active_snapshot }}
+      adjust_time_ist: ${{ steps.check.outputs.adjust_time_ist }}
+      action_word: ${{ steps.check.outputs.action_word }}
+      summary_text: ${{ steps.check.outputs.summary_text }}
+      pr_number: ${{ steps.check.outputs.pr_number }}
+    steps:
+      - name: Detect Environment Configuration
+        id: detect
+        run: |
+          ACTION="${{ github.event.action }}"
+          echo "Triggered action: [$ACTION]"
+
+          if [ "$ACTION" == "adjust_apm02_dc_addin_wait" ]; then
+            echo "env_name=APM-02 DC AddIn" >> $GITHUB_OUTPUT
+            echo "base_branch=main-dc-addin" >> $GITHUB_OUTPUT
+            echo "tenant_branch=tenant/asint-apm-02-dc-addin" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02 DC AddIn" >> $GITHUB_OUTPUT
+          elif [ "$ACTION" == "adjust_apm02_dc_wait" ]; then
+            echo "env_name=APM-02 DC" >> $GITHUB_OUTPUT
+            echo "base_branch=main-dc" >> $GITHUB_OUTPUT
+            echo "tenant_branch=tenant/asint-apm-02-dc" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02 DC" >> $GITHUB_OUTPUT
+          else
+            echo "env_name=APM-02" >> $GITHUB_OUTPUT
+            echo "base_branch=main" >> $GITHUB_OUTPUT
+            echo "tenant_branch=tenant/asint-apm-02-v2" >> $GITHUB_OUTPUT
+            echo "label_prefix=APM-02" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check active snapshot and update PR
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABEL_PREFIX: ${{ steps.detect.outputs.label_prefix }}
+        run: |
+          ACTIVE_PR_JSON=$(gh pr list --repo ${{ github.repository }} --state open --limit 500 --label "${LABEL_PREFIX} Active" --json number,headRefName --jq '.[0]')
+          
+          if [ -n "$ACTIVE_PR_JSON" ] && [ "$ACTIVE_PR_JSON" != "null" ]; then
+            ACTIVE=$(echo "$ACTIVE_PR_JSON" | jq -r '.headRefName')
+            PR_NUM=$(echo "$ACTIVE_PR_JSON" | jq -r '.number')
+            
+            CURRENT_TARGET=$(gh pr view "$PR_NUM" --repo ${{ github.repository }} --json body -q '.body' | grep -oP 'starts at \K.*?(?=\))')
+            TIME_STR=$(echo "$CURRENT_TARGET" | sed 's/ IST//')
+            
+            DEPLOY_NOW="${{ github.event.inputs.deploy_now || github.event.client_payload.deploy_now }}"
+            ADJUST_MINUTES="${{ github.event.inputs.adjust_minutes || github.event.client_payload.adjust_minutes || '10' }}"
+            
+            if [ "$DEPLOY_NOW" == "true" ]; then
+              EXTEND_TIME_IST=$(TZ='Asia/Kolkata' date +'%b %d, %Y %I:%M %p IST')
+              ACTION_WORD="Force-Started"
+              SUMMARY_TEXT="Force-Started (new time: $EXTEND_TIME_IST)"
+            else
+              EXTEND_TIME_IST=$(TZ='Asia/Kolkata' date -d "$TIME_STR + ${ADJUST_MINUTES} minutes" +'%b %d, %Y %I:%M %p IST')
+              ADJUST_VAL="$ADJUST_MINUTES"
+              if [[ "$ADJUST_VAL" == -* ]]; then
+                ACTION_WORD="Decreased"
+                CLEAN_VAL="${ADJUST_VAL#-}"
+              else
+                ACTION_WORD="Extended"
+                CLEAN_VAL="$ADJUST_VAL"
+              fi
+              SUMMARY_TEXT="$ACTION_WORD by $CLEAN_VAL minutes (new time: $EXTEND_TIME_IST)"
+            fi
+            
+            OLD_BODY=$(gh pr view "$PR_NUM" --repo ${{ github.repository }} --json body -q '.body')
+            NEW_BODY="${OLD_BODY//$CURRENT_TARGET/$EXTEND_TIME_IST}"
+            
+            if ! echo "$NEW_BODY" | grep -q "---"; then
+              NEW_BODY=$(printf '%s\n\n---\n**Extensions Log:**' "$NEW_BODY")
+            fi
+            
+            NEW_BODY=$(printf '%s\n- ⏳ %s by @%s (New time: %s)' "$NEW_BODY" "$SUMMARY_TEXT" "${{ github.actor }}" "$EXTEND_TIME_IST")
+            
+            gh pr edit "$PR_NUM" --repo ${{ github.repository }} --body "$NEW_BODY"
+            
+            echo "active_snapshot=$ACTIVE" >> $GITHUB_OUTPUT
+            echo "adjust_time_ist=$EXTEND_TIME_IST" >> $GITHUB_OUTPUT
+            echo "action_word=$ACTION_WORD" >> $GITHUB_OUTPUT
+            echo "summary_text=$SUMMARY_TEXT" >> $GITHUB_OUTPUT
+            echo "pr_number=$PR_NUM" >> $GITHUB_OUTPUT
+            echo "✅ Active snapshot '$ACTIVE' found (PR #$PR_NUM). Time extended to $EXTEND_TIME_IST."
+          else
+            echo "active_snapshot=" >> $GITHUB_OUTPUT
+            echo "❌ Blocked: No active snapshot found for ${LABEL_PREFIX}. You can only extend when a deployment is active."
+            exit 1
+          fi
+
+  # ─────────────────────────────────────────────
+  # Notify Teams: adjustment started
+  # ─────────────────────────────────────────────
+  notify-adjustment:
+    needs: guard
+    uses: ./.github/workflows/_apm02_notify.yml
+    with:
+      env_name: ${{ needs.guard.outputs.env_name }}
+      base_branch: ${{ needs.guard.outputs.base_branch }}
+      tenant_branch: ${{ needs.guard.outputs.tenant_branch }}
+      card_title: "⏳ ${{ needs.guard.outputs.env_name }} Waiting Window Modified"
+      card_subtitle: "An admin has ${{ needs.guard.outputs.action_word }} the waiting window."
+      status_text: "⏳ ${{ needs.guard.outputs.summary_text }}"
+      status_color: "accent"
+      snapshot_branch: ${{ needs.guard.outputs.active_snapshot }}
+      pr_number: ${{ needs.guard.outputs.pr_number }}
+      extra_fact_title: "Deployment Schedule"
+      extra_fact_value: "${{ needs.guard.outputs.env_name }} deployment will now start at ${{ needs.guard.outputs.adjust_time_ist }}."
+      show_snapshot_branch: true
+      show_sap_dashboard: false
+    secrets: inherit

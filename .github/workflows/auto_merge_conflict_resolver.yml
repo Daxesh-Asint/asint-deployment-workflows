@@ -1,0 +1,754 @@
+﻿name: "Auto-Merge: Conflict Resolution Handler"
+
+on:
+  pull_request:
+    branches:
+      - "tenant/**"
+      - "apm-eiot-temp-copy"
+      - "st-env-for-contentfederation"
+    types: [synchronize, closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull Request Number to handle"
+        required: true
+        default: "1013"
+
+concurrency:
+  group: conflict-resolver-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  handle-conflict-resolution:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Ensure Workflow Automation Scripts
+        run: |
+          if [ ! -f ".github/scripts/notify_conflict_resolved.sh" ] || [ ! -f ".github/cf-apps.json" ]; then
+            echo "Automation scripts missing in checked out ref. Fetching from default branch..."
+            git fetch origin dev main 2>/dev/null || true
+            git checkout origin/${{ github.event.repository.default_branch || 'dev' }} -- .github/scripts .github/cf-apps.json 2>/dev/null || \
+            git checkout origin/dev -- .github/scripts .github/cf-apps.json 2>/dev/null || \
+            git checkout origin/main -- .github/scripts .github/cf-apps.json 2>/dev/null || true
+          fi
+
+      - name: Inspect PR & Determine Action
+        id: inspect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_PR: ${{ inputs.pr_number }}
+          EV_PR: ${{ github.event.pull_request.number }}
+          EV_BASE: ${{ github.event.pull_request.base.ref }}
+          EV_HEAD: ${{ github.event.pull_request.head.ref }}
+          EV_ACTION: ${{ github.event.action }}
+          EV_MERGED: ${{ github.event.pull_request.merged }}
+          DEFAULT_REVIEWERS: ${{ secrets.DEFAULT_REVIEWERS || vars.DEFAULT_REVIEWERS }}
+        run: |
+          PR_NUMBER="${EV_PR:-$INPUT_PR}"
+          BASE_BRANCH="$EV_BASE"
+          [ -z "$BASE_BRANCH" ] && BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q .baseRefName)
+          HEAD_BRANCH="$EV_HEAD"
+          [ -z "$HEAD_BRANCH" ] && HEAD_BRANCH=$(gh pr view "$PR_NUMBER" --json headRefName -q .headRefName)
+          EVENT_ACTION="${EV_ACTION:-synchronize}"
+          IS_MERGED="$EV_MERGED"
+          [ -z "$IS_MERGED" ] && IS_MERGED=$(gh pr view "$PR_NUMBER" --json mergedAt -q 'if .mergedAt then "true" else "false" end')
+
+          echo "Inspecting PR #$PR_NUMBER (Base: $BASE_BRANCH, Head: $HEAD_BRANCH, Event: $EVENT_ACTION, Merged: $IS_MERGED)..."
+
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_ENV
+          echo "base_branch=$BASE_BRANCH" >> $GITHUB_ENV
+          echo "head_branch=$HEAD_BRANCH" >> $GITHUB_ENV
+
+          # 1. Fetch labels
+          LABELS=$(gh pr view "$PR_NUMBER" --json labels -q '.labels[].name')
+          echo "PR Labels: $LABELS"
+
+          IS_AUTO_MERGE="false"
+          if echo "$LABELS" | grep -qE '^auto merge'; then
+            IS_AUTO_MERGE="true"
+          fi
+
+          HAD_CONFLICTS="false"
+          if echo "$LABELS" | grep -qE 'conflicts detected|conflicts resolved'; then
+            HAD_CONFLICTS="true"
+          fi
+
+          if [ "$IS_AUTO_MERGE" != "true" ]; then
+            echo "Not an auto-merge deployment PR. Skipping."
+            echo "should_run=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # 2. Map Base Branch to Environment Metadata
+          DEPLOY_NAME="Unknown"
+          DASHBOARD_URL="https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+          CF_STOP_APP=""
+          CF_ORG=""
+          CF_SPACE=""
+          CF_API="https://api.cf.eu10-004.hana.ondemand.com"
+          IS_PROTECTED="false"
+          REVIEWERS=""
+          DEFAULT_REVIEWERS="${DEFAULT_REVIEWERS}"
+
+          case "$BASE_BRANCH" in
+            # ── 1. Core Module Branches ─────────────────────────
+            # 1.
+            "tenant/asint-ais-02")
+              DEPLOY_NAME="AIS-02"
+              DASHBOARD_URL="https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#/detail/AsInt-AIS-02/TwoColumnsBeginExpanded"
+              CF_STOP_APP="crawler-layer-backend"
+              CF_ORG="ais-02-eu10-org"
+              CF_SPACE="main"
+              ;;
+            # 2.
+            "tenant/asint-apm-01-new")
+              DEPLOY_NAME="APM-01"
+              CF_STOP_APP="crawler-layer-backend"
+              CF_ORG="asint-apm-01"
+              CF_SPACE="demo"
+              ;;
+            # 3.
+            "tenant/asint-apm-02-v2")
+              DEPLOY_NAME="APM-02"
+              ;;
+            # 4.
+            "apm-eiot-temp-copy")
+              DEPLOY_NAME="APM-EIOT"
+              ;;
+            # 5.
+            "tenant/asint-demo")
+              DEPLOY_NAME="ASINT-DEMO"
+              ;;
+            # 6.
+            "tenant/asint-irc-temp")
+              DEPLOY_NAME="IRC"
+              ;;
+            # 7.
+            "st-env-for-contentfederation")
+              DEPLOY_NAME="ST-ENV"
+              ;;
+            # 8.
+            "tenant/baystar")
+              DEPLOY_NAME="BAYSTAR"
+              ;;
+            # 9.
+            "tenant/hemlock-non-prod")
+              DEPLOY_NAME="HSC Non-Prod"
+              ;;
+            # 10.
+            "tenant/hemlock-prod")
+              DEPLOY_NAME="HSC Prod"
+              ;;
+            # 11.
+            "tenant/indorama-prod-900")
+              DEPLOY_NAME="Indorama Prod 900"
+              ;;
+            # 12.
+            "tenant/indorama-prod-933")
+              DEPLOY_NAME="Indorama Prod 933"
+              ;;
+            # 13.
+            "tenant/indorama-qa-233")
+              DEPLOY_NAME="Indorama QA 233"
+              ;;
+            # 14.
+            "tenant/indorama-qa-234")
+              DEPLOY_NAME="Indorama QA 234"
+              ;;
+            # 15.
+            "tenant/vmos-dev")
+              DEPLOY_NAME="VMOS"
+              ;;
+
+            # ── 2. DC Module Branches ───────────────────────────
+            # 1.
+            "tenant/asint-ais-02-dc")
+              DEPLOY_NAME="AIS-02 DC"
+              ;;
+            # 2.
+            "tenant/asint-apm-01-dc")
+              DEPLOY_NAME="APM-01 DC"
+              ;;
+            # 3.
+            "tenant/asint-apm-02-dc")
+              DEPLOY_NAME="APM-02 DC"
+              ;;
+            # 4.
+            "tenant/asint-apm-eiot-dc")
+              DEPLOY_NAME="APM-EIOT DC"
+              ;;
+            # 5.
+            "tenant/asint-demo-dc")
+              DEPLOY_NAME="AsInt Demo DC"
+              ;;
+            # 6.
+            "tenant/irc-dc")
+              DEPLOY_NAME="IRC DC"
+              ;;
+            # 7.
+            "tenant/asint-st-env-dc")
+              DEPLOY_NAME="ST-ENV DC"
+              ;;
+            # 8.
+            "tenant/baystar-dc")
+              DEPLOY_NAME="BAYSTAR DC"
+              ;;
+            # 9.
+            "tenant/hemlock-non-prod-dc")
+              DEPLOY_NAME="HSC Non-Prod DC"
+              ;;
+            # 10.
+            "tenant/hemlock-prod-dc")
+              DEPLOY_NAME="HSC Prod DC"
+              ;;
+            # 11.
+            "tenant/indorama-prod-900-dc")
+              DEPLOY_NAME="Indorama Prod 900 DC"
+              ;;
+            # 12.
+            "tenant/indorama-prod-933-dc")
+              DEPLOY_NAME="Indorama Prod 933 DC"
+              ;;
+            # 13.
+            "tenant/indorama-qa-233-dc")
+              DEPLOY_NAME="Indorama QA 233 DC"
+              ;;
+            # 14.
+            "tenant/indorama-qa-234-dc")
+              DEPLOY_NAME="Indorama QA 234 DC"
+              ;;
+            # 15.
+            "tenant/vmos-dc")
+              DEPLOY_NAME="VMOS DC"
+              ;;
+
+            # ── 3. DC AddIn Module Branches ─────────────────────
+            # 1.
+            "tenant/asint-ais-02-dc-addin")
+              DEPLOY_NAME="AIS-02 DC AddIn"
+              ;;
+            # 2.
+            "tenant/asint-apm-01-dc-addin")
+              DEPLOY_NAME="APM-01 DC AddIn"
+              ;;
+            # 3.
+            "tenant/asint-apm-02-dc-addin")
+              DEPLOY_NAME="APM-02 DC AddIn"
+              ;;
+            # 4.
+            "tenant/asint-apm-eiot-dc-addin")
+              DEPLOY_NAME="APM-EIOT DC AddIn"
+              ;;
+            # 5.
+            "tenant/asint-demo-dc-addin")
+              DEPLOY_NAME="AsInt Demo DC AddIn"
+              ;;
+            # 6.
+            "tenant/irc-dc-addin")
+              DEPLOY_NAME="IRC DC AddIn"
+              ;;
+            # 7.
+            "tenant/asint-st-env-dc-addin")
+              DEPLOY_NAME="ST-ENV DC AddIn"
+              ;;
+            # 8.
+            "tenant/baystar-dc-addin")
+              DEPLOY_NAME="BAYSTAR DC AddIn"
+              ;;
+            # 9.
+            "tenant/hemlock-non-prod-dc-addin")
+              DEPLOY_NAME="HSC Non-Prod DC AddIn"
+              ;;
+            # 10.
+            "tenant/hemlock-prod-dc-addin")
+              DEPLOY_NAME="HSC Prod DC AddIn"
+              ;;
+            # 11.
+            "tenant/indorama-prod-900-dc-addin")
+              DEPLOY_NAME="Indorama Prod 900 DC AddIn"
+              ;;
+            # 12.
+            "tenant/indorama-prod-933-dc-addin")
+              DEPLOY_NAME="Indorama Prod 933 DC AddIn"
+              ;;
+            # 13.
+            "tenant/indorama-qa-233-dc-addin")
+              DEPLOY_NAME="Indorama QA 233 DC AddIn"
+              ;;
+            # 14.
+            "tenant/indorama-qa-234-dc-addin")
+              DEPLOY_NAME="Indorama QA 234 DC AddIn"
+              ;;
+            # 15.
+            "tenant/vmos-dc-addin")
+              DEPLOY_NAME="VMOS DC AddIn"
+              ;;
+          esac
+
+          # ── Dynamically resolve branch protection status from GitHub ──
+          # No hardcoding needed: any branch protected on GitHub is auto-detected.
+          ENCODED_BRANCH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$BASE_BRANCH', safe=''))" 2>/dev/null || echo "$BASE_BRANCH")
+          IS_PROTECTED=$(gh api "repos/${{ github.repository }}/branches/$ENCODED_BRANCH" --jq '.protected' 2>/dev/null || echo "false")
+          echo "Branch '$BASE_BRANCH' protected status: $IS_PROTECTED"
+          if [ "$IS_PROTECTED" = "true" ]; then
+            REVIEWERS="$DEFAULT_REVIEWERS"
+          fi
+
+          # Resolve CF configuration from .github/cf-apps.json
+          CONFIG_FILE=".github/cf-apps.json"
+          if [ -f "$CONFIG_FILE" ]; then
+            CF_ENV_JSON=$(jq -c --arg name "$DEPLOY_NAME" '
+              def norm: ascii_downcase | gsub("[^a-z0-9]"; "");
+              .environments as $envs |
+              ([$envs | to_entries[] | select(
+                (.key | norm) == ($name | norm) or
+                ((.value.aliases // [])[] | norm) == ($name | norm)
+              ) | .value] | first) // null
+            ' "$CONFIG_FILE" 2>/dev/null || echo "")
+
+            if [ -n "$CF_ENV_JSON" ] && [ "$CF_ENV_JSON" != "null" ]; then
+              CF_API=$(echo "$CF_ENV_JSON" | jq -r '.api // empty')
+              CF_ORG=$(echo "$CF_ENV_JSON" | jq -r '.org // empty')
+              CF_SPACE=$(echo "$CF_ENV_JSON" | jq -r '.space // empty')
+              CF_APPS_RAW=$(echo "$CF_ENV_JSON" | jq -r '(.apps // [])[]' 2>/dev/null || echo "")
+            fi
+          fi
+
+          CF_APPS_COMMA=""
+          CF_APPS_COUNT=0
+          while IFS= read -r app; do
+            TRIMMED=$(echo "$app" | xargs)
+            if [ -n "$TRIMMED" ]; then
+              if [ -z "$CF_APPS_COMMA" ]; then
+                CF_APPS_COMMA="$TRIMMED"
+              else
+                CF_APPS_COMMA="$CF_APPS_COMMA, $TRIMMED"
+              fi
+              CF_APPS_COUNT=$((CF_APPS_COUNT + 1))
+            fi
+          done <<< "$CF_APPS_RAW"
+
+          echo "deploy_name=$DEPLOY_NAME" >> $GITHUB_ENV
+          echo "dashboard_url=$DASHBOARD_URL" >> $GITHUB_ENV
+          echo "cf_apps_comma=$CF_APPS_COMMA" >> $GITHUB_ENV
+          echo "cf_apps_count=$CF_APPS_COUNT" >> $GITHUB_ENV
+          echo "cf_org=$CF_ORG" >> $GITHUB_ENV
+          echo "cf_space=$CF_SPACE" >> $GITHUB_ENV
+          echo "cf_api=$CF_API" >> $GITHUB_ENV
+          echo "is_protected=$IS_PROTECTED" >> $GITHUB_ENV
+          echo "reviewers=$REVIEWERS" >> $GITHUB_ENV
+
+          # Case A: Developer manually merged after resolving conflicts
+          if [ "$EVENT_ACTION" = "closed" ] && [ "$IS_MERGED" = "true" ]; then
+            if [ "$HAD_CONFLICTS" = "true" ]; then
+              echo "Developer resolved conflicts and merged PR #$PR_NUMBER manually."
+              echo "should_run=true" >> $GITHUB_ENV
+              echo "action_type=merged" >> $GITHUB_ENV
+              echo "need_merge=false" >> $GITHUB_ENV
+              exit 0
+            else
+              echo "PR closed/merged normally without conflict history. Skipping."
+              echo "should_run=false" >> $GITHUB_ENV
+              exit 0
+            fi
+          fi
+
+          # Case B: Developer resolved conflicts and pushed new commit (synchronize)
+          if [ "$EVENT_ACTION" = "synchronize" ]; then
+            if [ "$HAD_CONFLICTS" != "true" ]; then
+              echo "PR does not have conflict history. Skipping conflict resolution handler."
+              echo "should_run=false" >> $GITHUB_ENV
+              exit 0
+            fi
+
+            # Wait for GitHub mergeability check
+            echo "Checking if conflicts are resolved..."
+            MERGEABLE="UNKNOWN"
+            for i in {1..12}; do
+              CURRENT_STATE=$(gh pr view "$PR_NUMBER" --json state -q .state)
+              if [ "$CURRENT_STATE" != "OPEN" ]; then
+                echo "PR #$PR_NUMBER is no longer OPEN ($CURRENT_STATE). Exiting."
+                echo "should_run=false" >> $GITHUB_ENV
+                exit 0
+              fi
+
+              MERGEABLE=$(gh pr view "$PR_NUMBER" --json mergeable -q .mergeable)
+              echo "Attempt $i: mergeable = '$MERGEABLE'"
+
+              if [ "$MERGEABLE" = "MERGEABLE" ]; then
+                echo "🎉 Conflicts resolved! PR is now MERGEABLE."
+                break
+              fi
+              sleep 5
+            done
+
+            if [ "$MERGEABLE" = "MERGEABLE" ]; then
+              echo "should_run=true" >> $GITHUB_ENV
+
+              if [ "$IS_PROTECTED" = "true" ]; then
+                # Check if PR already has an approved review
+                HAS_APPROVAL=$(gh pr view "$PR_NUMBER" --json reviews -q '[.reviews[] | select(.state=="APPROVED")] | length')
+                echo "Approved reviews count: $HAS_APPROVAL"
+
+                if [ "$HAS_APPROVAL" -gt 0 ] 2>/dev/null; then
+                  echo "Protected branch PR is already approved. Proceeding to auto-merge."
+                  echo "action_type=merged" >> $GITHUB_ENV
+                  echo "need_merge=true" >> $GITHUB_ENV
+                else
+                  echo "Protected branch PR requires approval. Requesting reviewers."
+                  echo "action_type=awaiting_approval" >> $GITHUB_ENV
+                  echo "need_merge=false" >> $GITHUB_ENV
+                fi
+              else
+                # Unprotected branch: auto-merge directly
+                echo "action_type=merged" >> $GITHUB_ENV
+                echo "need_merge=true" >> $GITHUB_ENV
+              fi
+              exit 0
+            else
+              echo "PR still not mergeable (status: $MERGEABLE). Waiting for manual conflict resolution."
+              echo "should_run=false" >> $GITHUB_ENV
+              exit 0
+            fi
+          fi
+
+          echo "should_run=false" >> $GITHUB_ENV
+
+      # ──────────────────────────────────────────────────────────
+      # Stop CF app(s) if required (only if automation is merging)
+      # ──────────────────────────────────────────────────────────
+      - name: Stop CF App Before Auto-Merge
+        if: env.should_run == 'true' && env.need_merge == 'true' && env.cf_apps_count != '0'
+        env:
+          CF_USERNAME: ${{ secrets.CF_USERNAME }}
+          CF_PASSWORD: ${{ secrets.CF_PASSWORD }}
+        run: |
+          echo "Installing Cloud Foundry CLI..."
+          wget -q -O - https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key | sudo apt-key add -
+          echo "deb https://packages.cloudfoundry.org/debian stable main" | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
+          sudo apt-get update -qq
+          sudo apt-get install -y cf8-cli
+
+          echo "Logging into Cloud Foundry..."
+          cf login -a "${{ env.cf_api }}" -u "$CF_USERNAME" -p "$CF_PASSWORD"
+          cf target -o "${{ env.cf_org }}" -s "${{ env.cf_space }}" || cf target -o "0f54752b-a45b-49e0-9426-27cc38ee2dec" -s "${{ env.cf_space }}" || cf target -o "d3189c73-7adc-4cc0-afa6-22d3ac41bd9e" -s "${{ env.cf_space }}" || true
+
+          IFS=',' read -ra APPS_LIST <<< "$cf_apps_comma"
+          for app in "${APPS_LIST[@]}"; do
+            TRIMMED=$(echo "$app" | xargs)
+            if [ -n "$TRIMMED" ]; then
+              echo "🛑 Stopping app $TRIMMED to free memory quota..."
+              cf stop "$TRIMMED"
+            fi
+          done
+          echo "app_was_stopped=true" >> $GITHUB_ENV
+
+      # ──────────────────────────────────────────────────────────
+      # Merge PR automatically (for unprotected branches or pre-approved PRs)
+      # ──────────────────────────────────────────────────────────
+      - name: Auto-Merge Resolved PR
+        id: merge
+        if: env.should_run == 'true' && env.need_merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN || github.token }}
+          PR_NUMBER: ${{ env.pr_number }}
+        run: |
+          echo "Auto-merging PR #$PR_NUMBER..."
+          if gh pr merge "$PR_NUMBER" --merge --admin; then
+            echo "PR #$PR_NUMBER merged successfully using standard merge!"
+          elif gh pr merge "$PR_NUMBER" --squash --admin; then
+            echo "Standard merge disallowed; PR #$PR_NUMBER merged successfully using squash merge!"
+          elif gh pr merge "$PR_NUMBER" --merge; then
+            echo "PR #$PR_NUMBER merged successfully using standard merge!"
+          elif gh pr merge "$PR_NUMBER" --squash; then
+            echo "Standard merge disallowed; PR #$PR_NUMBER merged successfully using squash merge!"
+          else
+            echo "Failed to merge PR #$PR_NUMBER (both standard and squash merge failed)"
+            exit 1
+          fi
+
+      # ──────────────────────────────────────────────────────────
+      # Safety Net: Restart App if Merge Failed
+      # ──────────────────────────────────────────────────────────
+      - name: Safety Restart App If Merge Failed
+        if: failure() && env.app_was_stopped == 'true'
+        env:
+          CF_USERNAME: ${{ secrets.CF_USERNAME }}
+          CF_PASSWORD: ${{ secrets.CF_PASSWORD }}
+        run: |
+          echo "⚠️ Merge failed after app was stopped! Restarting $cf_apps_comma immediately..."
+          cf login -a "${{ env.cf_api }}" -u "$CF_USERNAME" -p "$CF_PASSWORD"
+          cf target -o "${{ env.cf_org }}" -s "${{ env.cf_space }}" || cf target -o "0f54752b-a45b-49e0-9426-27cc38ee2dec" -s "${{ env.cf_space }}" || cf target -o "d3189c73-7adc-4cc0-afa6-22d3ac41bd9e" -s "${{ env.cf_space }}" || true
+          IFS=',' read -ra APPS_LIST <<< "$cf_apps_comma"
+          for app in "${APPS_LIST[@]}"; do
+            TRIMMED=$(echo "$app" | xargs)
+            if [ -n "$TRIMMED" ]; then
+              cf start "$TRIMMED"
+            fi
+          done
+
+      # ──────────────────────────────────────────────────────────
+      # Protected Branch Flow: Assign 5 Reviewers & Set Awaiting Approval
+      # ──────────────────────────────────────────────────────────
+      - name: Assign Reviewers & Request Approval
+        if: env.should_run == 'true' && env.action_type == 'awaiting_approval'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ env.pr_number }}
+          REVIEWERS: ${{ env.reviewers }}
+        run: |
+          echo "Conflicts resolved! Setting up approval for protected branch..."
+          gh label create "conflicts resolved" --color "#0e8a16" --description "Merge conflicts were successfully resolved" 2>/dev/null || true
+          gh label create "awaiting approval" --color "#fbca04" --description "Awaiting required peer approval" 2>/dev/null || true
+          gh pr edit "$PR_NUMBER" --remove-label "conflicts detected" 2>/dev/null || true
+          gh pr edit "$PR_NUMBER" --add-label "conflicts resolved" 2>/dev/null || true
+          gh pr edit "$PR_NUMBER" --add-label "awaiting approval" 2>/dev/null || true
+
+          # Request review from each reviewer
+          IFS=',' read -ra REV_ARR <<< "$REVIEWERS"
+          for rev in "${REV_ARR[@]}"; do
+            TRIMMED_REV=$(echo "$rev" | xargs)
+            if [ -n "$TRIMMED_REV" ]; then
+              echo "Requesting review from: $TRIMMED_REV"
+              gh pr edit "$PR_NUMBER" --add-reviewer "$TRIMMED_REV" 2>/dev/null || true
+            fi
+          done
+
+          if [ -n "$REVIEWERS" ]; then
+            gh pr comment "$PR_NUMBER" --body "🟡 **Conflicts Resolved & Awaiting Approval:** Merge conflicts have been resolved and the PR is now mergeable! Assigned reviewers: \`$REVIEWERS\`. Once approved by any 1 reviewer, the PR will be automatically merged and deployment will resume." 2>/dev/null || true
+          else
+            gh pr comment "$PR_NUMBER" --body "🟡 **Conflicts Resolved & Awaiting Approval:** Merge conflicts have been resolved and the PR is now mergeable! Once approved, the PR will be automatically merged and deployment will resume." 2>/dev/null || true
+          fi
+
+      # ──────────────────────────────────────────────────────────
+      # Update Labels on Merged PR
+      # ──────────────────────────────────────────────────────────
+      - name: Update PR Labels on Merge
+        if: env.should_run == 'true' && env.action_type == 'merged'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ env.pr_number }}
+        run: |
+          gh label create "conflicts resolved" --color "#0e8a16" --description "Merge conflicts were successfully resolved" 2>/dev/null || true
+          gh label create "approved and merged" --color "#0e8a16" --description "Approved by reviewer and merged" 2>/dev/null || true
+          gh pr edit "$PR_NUMBER" --remove-label "conflicts detected" 2>/dev/null || true
+          gh pr edit "$PR_NUMBER" --remove-label "awaiting approval" 2>/dev/null || true
+          gh pr edit "$PR_NUMBER" --add-label "conflicts resolved" 2>/dev/null || true
+          gh pr edit "$PR_NUMBER" --add-label "approved and merged" 2>/dev/null || true
+
+      # ──────────────────────────────────────────────────────────
+      # Send MS Teams Notification for Conflict Resolution
+      # ──────────────────────────────────────────────────────────
+      - name: Send Conflicts Resolved Teams Card
+        if: env.should_run == 'true' && (env.action_type == 'awaiting_approval' || env.action_type == 'merged')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ env.pr_number }}
+          DEPLOY_NAME: ${{ env.deploy_name }}
+          BASE_BRANCH: ${{ env.base_branch }}
+          HEAD_BRANCH: ${{ env.head_branch }}
+          RESOLVER: ${{ github.actor }}
+          DASHBOARD_URL: ${{ env.dashboard_url }}
+          REVIEWERS: ${{ env.reviewers }}
+          ACTION_TYPE: ${{ env.action_type }}
+          APP_WAS_STOPPED: ${{ env.app_was_stopped }}
+          CF_APPS_COMMA: ${{ env.cf_apps_comma }}
+          TEAMS_WEBHOOK_GLOBAL_1: ${{ secrets.TEAMS_WEBHOOK_GLOBAL_1 }}
+          TEAMS_WEBHOOK_GLOBAL_2: ${{ secrets.TEAMS_WEBHOOK_GLOBAL_2 }}
+          TEAMS_WEBHOOK_GLOBAL_3: ${{ secrets.TEAMS_WEBHOOK_GLOBAL_3 }}
+          TEAMS_WEBHOOK_AIS02_1: ${{ secrets.TEAMS_WEBHOOK_AIS02_1 }}
+          TEAMS_WEBHOOK_AIS02_2: ${{ secrets.TEAMS_WEBHOOK_AIS02_2 }}
+          TEAMS_WEBHOOK_AIS02_3: ${{ secrets.TEAMS_WEBHOOK_AIS02_3 }}
+          TEAMS_WEBHOOK_APM01_1: ${{ secrets.TEAMS_WEBHOOK_APM01_1 }}
+          TEAMS_WEBHOOK_APM01_2: ${{ secrets.TEAMS_WEBHOOK_APM01_2 }}
+          TEAMS_WEBHOOK_APM01_3: ${{ secrets.TEAMS_WEBHOOK_APM01_3 }}
+          TEAMS_WEBHOOK_APM02_1: ${{ secrets.TEAMS_WEBHOOK_APM02_1 }}
+          TEAMS_WEBHOOK_APM02_2: ${{ secrets.TEAMS_WEBHOOK_APM02_2 }}
+          TEAMS_WEBHOOK_APM02_3: ${{ secrets.TEAMS_WEBHOOK_APM02_3 }}
+          TEAMS_WEBHOOK_APMEIOT_1: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_1 }}
+          TEAMS_WEBHOOK_APMEIOT_2: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_2 }}
+          TEAMS_WEBHOOK_APMEIOT_3: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_3 }}
+          TEAMS_WEBHOOK_DEMO_1: ${{ secrets.TEAMS_WEBHOOK_DEMO_1 }}
+          TEAMS_WEBHOOK_DEMO_2: ${{ secrets.TEAMS_WEBHOOK_DEMO_2 }}
+          TEAMS_WEBHOOK_DEMO_3: ${{ secrets.TEAMS_WEBHOOK_DEMO_3 }}
+          TEAMS_WEBHOOK_BAYSTAR_1: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_1 }}
+          TEAMS_WEBHOOK_BAYSTAR_2: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_2 }}
+          TEAMS_WEBHOOK_BAYSTAR_3: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_3 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_1: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_1 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_2: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_2 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_3: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_3 }}
+          TEAMS_WEBHOOK_HSC_PROD_1: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_1 }}
+          TEAMS_WEBHOOK_HSC_PROD_2: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_2 }}
+          TEAMS_WEBHOOK_HSC_PROD_3: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_3 }}
+          TEAMS_WEBHOOK_IRC_1: ${{ secrets.TEAMS_WEBHOOK_IRC_1 }}
+          TEAMS_WEBHOOK_IRC_2: ${{ secrets.TEAMS_WEBHOOK_IRC_2 }}
+          TEAMS_WEBHOOK_IRC_3: ${{ secrets.TEAMS_WEBHOOK_IRC_3 }}
+          TEAMS_WEBHOOK_ST_ENV_1: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_1 }}
+          TEAMS_WEBHOOK_ST_ENV_2: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_2 }}
+          TEAMS_WEBHOOK_ST_ENV_3: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_3 }}
+          TEAMS_WEBHOOK_VMOS_1: ${{ secrets.TEAMS_WEBHOOK_VMOS_1 }}
+          TEAMS_WEBHOOK_VMOS_2: ${{ secrets.TEAMS_WEBHOOK_VMOS_2 }}
+          TEAMS_WEBHOOK_VMOS_3: ${{ secrets.TEAMS_WEBHOOK_VMOS_3 }}
+          TEAMS_WEBHOOK_AIS02_DC_1: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_1 }}
+          TEAMS_WEBHOOK_AIS02_DC_2: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_2 }}
+          TEAMS_WEBHOOK_AIS02_DC_3: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_3 }}
+          TEAMS_WEBHOOK_AIS02_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_AIS02_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_AIS02_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_AIS02_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_APM02_DC_1: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_1 }}
+          TEAMS_WEBHOOK_APM02_DC_2: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_2 }}
+          TEAMS_WEBHOOK_APM02_DC_3: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_3 }}
+          TEAMS_WEBHOOK_APM02_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_APM02_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_APM02_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_APM02_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_1: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_1 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_2: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_2 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_3: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_3 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_APMEIOT_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_DEMO_DC_1: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_1 }}
+          TEAMS_WEBHOOK_DEMO_DC_2: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_2 }}
+          TEAMS_WEBHOOK_DEMO_DC_3: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_3 }}
+          TEAMS_WEBHOOK_DEMO_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_DEMO_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_DEMO_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_DEMO_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_1: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_1 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_2: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_2 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_3: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_3 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_BAYSTAR_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_1: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_1 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_2: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_2 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_3: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_3 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_HSC_NON_PROD_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_1: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_1 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_2: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_2 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_3: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_3 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_HSC_PROD_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_900_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_3 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_PROD_933_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_233_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_3 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_INDORAMA_QA_234_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_IRC_DC_1: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_1 }}
+          TEAMS_WEBHOOK_IRC_DC_2: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_2 }}
+          TEAMS_WEBHOOK_IRC_DC_3: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_3 }}
+          TEAMS_WEBHOOK_IRC_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_IRC_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_IRC_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_IRC_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_1: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_1 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_2: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_2 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_3: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_3 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_ST_ENV_DC_ADDIN_3 }}
+          TEAMS_WEBHOOK_VMOS_DC_1: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_1 }}
+          TEAMS_WEBHOOK_VMOS_DC_2: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_2 }}
+          TEAMS_WEBHOOK_VMOS_DC_3: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_3 }}
+          TEAMS_WEBHOOK_VMOS_DC_ADDIN_1: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_ADDIN_1 }}
+          TEAMS_WEBHOOK_VMOS_DC_ADDIN_2: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_ADDIN_2 }}
+          TEAMS_WEBHOOK_VMOS_DC_ADDIN_3: ${{ secrets.TEAMS_WEBHOOK_VMOS_DC_ADDIN_3 }}
+        run: |
+          chmod +x .github/scripts/notify_conflict_resolved.sh
+          ./.github/scripts/notify_conflict_resolved.sh
+
+      # ──────────────────────────────────────────────────────────
+      # 📖 Global Wiki Deployment History Update
+      # ──────────────────────────────────────────────────────────
+      - name: Checkout Wiki
+        if: always() && env.should_run == 'true' && (env.need_merge == 'true' || env.action_type == 'merged')
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN || github.token }}
+
+      - name: Setup Node.js for Wiki
+        if: always() && env.should_run == 'true' && (env.need_merge == 'true' || env.action_type == 'merged')
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Update Global Wiki Deployment History
+        if: always() && env.should_run == 'true' && (env.need_merge == 'true' || env.action_type == 'merged')
+        run: |
+          if [ -d "wiki" ]; then
+            PR_NUM="${{ env.pr_number }}"
+            COMMIT_ID=""
+            if [ -n "$PR_NUM" ]; then
+              COMMIT_ID=$(gh pr view "$PR_NUM" --json mergeCommit --jq '.mergeCommit.oid // empty' 2>/dev/null || true)
+            fi
+
+            export WIKI_PAYLOAD=$(jq -n \
+              --arg env "${{ env.deploy_name || env.base_branch }}" \
+              --arg action "conflict_merge" \
+              --arg pr "$PR_NUM" \
+              --arg commit "$COMMIT_ID" \
+              --arg source "${{ env.head_branch }}" \
+              --arg target "${{ env.base_branch }}" \
+              --arg actor "${{ github.actor }}" \
+              --arg status "Conflicts Resolved & Merged" \
+              '{
+                environment: $env,
+                action: $action,
+                pr_number: $pr,
+                commit_id: $commit,
+                source_branch: $source,
+                target_branch: $target,
+                actor: $actor,
+                status: $status
+              }')
+
+            node .github/scripts/update_wiki_global.js || echo "Global wiki update warning: script finished with error"
+          else
+            echo "Wiki repository not found. Skipping wiki update."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN || github.token }}
+

@@ -1,0 +1,22 @@
+﻿name: "Deploy: AIS-02"
+
+on:
+  repository_dispatch:
+    types: [trigger_ais02_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "tenant/asint-ais-02"
+      compare: "dev"
+      deployment_name: "AIS-02"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#/detail/AsInt-AIS-02/TwoColumnsBeginExpanded"
+      cf_stop_app: "crawler-layer-backend"
+      cf_api: "https://api.cf.eu10-004.hana.ondemand.com"
+      cf_org: "ais-02-eu10-org"
+      cf_space: "main"
+    secrets: inherit

@@ -1,0 +1,18 @@
+﻿name: "Deploy: AIS-02 DC AddIn"
+
+on:
+  repository_dispatch:
+    types: [trigger_ais02_dc_addin_deployment]
+
+jobs:
+  merging-process:
+    uses: ./.github/workflows/_auto_merge.yml
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      base: "tenant/asint-ais-02-dc-addin"
+      compare: "dev"
+      deployment_name: "AIS-02 DC AddIn"
+      dashboard_url: "https://asint-payg-development.cicd.cfapps.eu10.hana.ondemand.com/ui/index.html#"
+    secrets: inherit
