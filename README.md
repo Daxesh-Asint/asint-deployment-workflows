@@ -1,4 +1,4 @@
-﻿# AsInt Deployment Automation — Workflows Guide
+# AsInt Deployment Automation — Workflows Guide
 
 This document lists all deployment workflows in the repository. For each workflow, it provides:
 1. **File Name** (Clickable link to open the YAML file)
@@ -177,7 +177,7 @@ This document lists all deployment workflows in the repository. For each workflo
 * **Steps performed:**
   1. Compares base branch with incoming compare branch (e.g. `dev`).
   2. If clean with no conflicts, creates and immediately merges the PR.
-  3. If configured, stops Cloud Foundry apps during migration.
+  3. If configured, stops Cloud Foundry apps during deployment to prevent organization or space memory exceed release fail issue.
   4. If merge conflicts exist, pauses, assigns labels, and alerts the team on Microsoft Teams.
 
 ---
