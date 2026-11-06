@@ -306,34 +306,71 @@ This document lists all deployment workflows in the repository. For each workflo
 
 ---
 
-## Section 4: Tenant Deployment Callers (`deploy_*.yml` — 43 Workflows)
+## Section 4: Tenant Deployment Callers (42 Workflows)
 
 * **What do they do?**  
-  Each workflow targets a specific tenant environment (e.g. `tenant/asint-ais-02`, `tenant/asint-apm-01`, `tenant/asint-baystar`). It calls `_auto_merge.yml` with `dev` as the compare branch to automatically merge changes into the tenant branch and kick off the deployment build.
+  Each workflow triggers deployment for a specific tenant and module (Core, Data Collector, or Add-In). It calls `_auto_merge.yml` with its designated **Compare Branch** (e.g. `main`, `dev`, or a QA branch) and **Target Tenant Branch** to automatically merge updates and trigger the SAP CI/CD build.
 * **When are they triggered?**
   ```yaml
   on:
     repository_dispatch:
-      types: [trigger_<tenant>_deployment]
-    workflow_dispatch: # (where enabled)
+      types: [trigger_<environment>_deployment]
+    workflow_dispatch:
   ```
 * **Steps performed:**
-  1. Calls `_auto_merge.yml` with the tenant base branch and `dev` as compare branch.
-  2. Checks for conflicts; merges clean commits into the tenant branch.
-  3. Kicks off SAP CI/CD build for that tenant.
+  1. Calls `_auto_merge.yml` with the tenant's specific `compare` branch and target `base` branch.
+  2. Evaluates mergeability; if clean with no conflicts, creates and merges the PR automatically.
+  3. Optionally stops configured Cloud Foundry apps to avoid exceeding space/org memory limits.
+  4. Triggers the tenant's build in SAP CI/CD.
 
-### Tenant Workflows Directory:
-* **AIS 02:** [`deploy_ais02_dc.yml`](.github/workflows/deploy_ais02_dc.yml), [`deploy_ais02_dc_addin.yml`](.github/workflows/deploy_ais02_dc_addin.yml), [`merge_dev_to_tenant_ais02.yml`](.github/workflows/merge_dev_to_tenant_ais02.yml)
-* **APM 01:** [`deploy_apm01.yml`](.github/workflows/deploy_apm01.yml), [`deploy_apm01_dc.yml`](.github/workflows/deploy_apm01_dc.yml), [`deploy_apm01_dc_addin.yml`](.github/workflows/deploy_apm01_dc_addin.yml)
-* **APM EIOT:** [`deploy_apm_eiot.yml`](.github/workflows/deploy_apm_eiot.yml), [`deploy_apm_eiot_dc.yml`](.github/workflows/deploy_apm_eiot_dc.yml), [`deploy_apm_eiot_dc_addin.yml`](.github/workflows/deploy_apm_eiot_dc_addin.yml)
-* **AsInt Demo:** [`deploy_asint_demo.yml`](.github/workflows/deploy_asint_demo.yml), [`deploy_asint_demo_dc.yml`](.github/workflows/deploy_asint_demo_dc.yml), [`deploy_asint_demo_dc_addin.yml`](.github/workflows/deploy_asint_demo_dc_addin.yml)
-* **Baystar:** [`deploy_baystar.yml`](.github/workflows/deploy_baystar.yml), [`deploy_baystar_dc.yml`](.github/workflows/deploy_baystar_dc.yml), [`deploy_baystar_dc_addin.yml`](.github/workflows/deploy_baystar_dc_addin.yml)
-* **HSC Non-Prod & Prod:** [`deploy_hsc_non_prod.yml`](.github/workflows/deploy_hsc_non_prod.yml), [`deploy_hsc_non_prod_dc.yml`](.github/workflows/deploy_hsc_non_prod_dc.yml), [`deploy_hsc_non_prod_dc_addin.yml`](.github/workflows/deploy_hsc_non_prod_dc_addin.yml), [`deploy_hsc_prod.yml`](.github/workflows/deploy_hsc_prod.yml), [`deploy_hsc_prod_dc.yml`](.github/workflows/deploy_hsc_prod_dc.yml), [`deploy_hsc_prod_dc_addin.yml`](.github/workflows/deploy_hsc_prod_dc_addin.yml)
-* **Indorama Prod (900 & 933):** [`deploy_indorama_prod_900.yml`](.github/workflows/deploy_indorama_prod_900.yml), [`deploy_indorama_prod_900_dc.yml`](.github/workflows/deploy_indorama_prod_900_dc.yml), [`deploy_indorama_prod_900_dc_addin.yml`](.github/workflows/deploy_indorama_prod_900_dc_addin.yml), [`deploy_indorama_prod_933.yml`](.github/workflows/deploy_indorama_prod_933.yml), [`deploy_indorama_prod_933_dc.yml`](.github/workflows/deploy_indorama_prod_933_dc.yml), [`deploy_indorama_prod_933_dc_addin.yml`](.github/workflows/deploy_indorama_prod_933_dc_addin.yml)
-* **Indorama QA (233 & 234):** [`deploy_indorama_qa_233.yml`](.github/workflows/deploy_indorama_qa_233.yml), [`deploy_indorama_qa_233_dc.yml`](.github/workflows/deploy_indorama_qa_233_dc.yml), [`deploy_indorama_qa_233_dc_addin.yml`](.github/workflows/deploy_indorama_qa_233_dc_addin.yml), [`deploy_indorama_qa_234.yml`](.github/workflows/deploy_indorama_qa_234.yml), [`deploy_indorama_qa_234_dc.yml`](.github/workflows/deploy_indorama_qa_234_dc.yml), [`deploy_indorama_qa_234_dc_addin.yml`](.github/workflows/deploy_indorama_qa_234_dc_addin.yml)
-* **IRC:** [`deploy_irc.yml`](.github/workflows/deploy_irc.yml), [`deploy_irc_dc.yml`](.github/workflows/deploy_irc_dc.yml), [`deploy_irc_dc_addin.yml`](.github/workflows/deploy_irc_dc_addin.yml)
-* **ST Env:** [`deploy_st_env.yml`](.github/workflows/deploy_st_env.yml), [`deploy_st_env_dc.yml`](.github/workflows/deploy_st_env_dc.yml), [`deploy_st_env_dc_addin.yml`](.github/workflows/deploy_st_env_dc_addin.yml)
-* **VMOS:** [`deploy_vmos.yml`](.github/workflows/deploy_vmos.yml), [`deploy_vmos_dc.yml`](.github/workflows/deploy_vmos_dc.yml), [`deploy_vmos_dc_addin.yml`](.github/workflows/deploy_vmos_dc_addin.yml)
+---
+
+### Complete Tenant Branch Mapping Table
+
+| Tenant Environment | Module | Workflow File | Compare Branch (Source) | Target Tenant Branch (Destination) |
+| :--- | :--- | :--- | :--- | :--- |
+| **AIS 02** | Core | [`merge_dev_to_tenant_ais02.yml`](.github/workflows/merge_dev_to_tenant_ais02.yml) | `dev` | `tenant/asint-ais-02` |
+| | DC | [`deploy_ais02_dc.yml`](.github/workflows/deploy_ais02_dc.yml) | `dev` | `tenant/asint-ais-02-dc` |
+| | DC AddIn | [`deploy_ais02_dc_addin.yml`](.github/workflows/deploy_ais02_dc_addin.yml) | `dev` | `tenant/asint-ais-02-dc-addin` |
+| **APM 01** | Core | [`deploy_apm01.yml`](.github/workflows/deploy_apm01.yml) | `main` | `tenant/asint-apm-01-new` |
+| | DC | [`deploy_apm01_dc.yml`](.github/workflows/deploy_apm01_dc.yml) | `main-dc` | `tenant/asint-apm-01-dc` |
+| | DC AddIn | [`deploy_apm01_dc_addin.yml`](.github/workflows/deploy_apm01_dc_addin.yml) | `main-dc-addin` | `tenant/asint-apm-01-dc-addin` |
+| **APM EIOT** | Core | [`deploy_apm_eiot.yml`](.github/workflows/deploy_apm_eiot.yml) | `main` | `apm-eiot-temp-copy` |
+| | DC | [`deploy_apm_eiot_dc.yml`](.github/workflows/deploy_apm_eiot_dc.yml) | `main-dc` | `tenant/asint-apm-eiot-dc` |
+| | DC AddIn | [`deploy_apm_eiot_dc_addin.yml`](.github/workflows/deploy_apm_eiot_dc_addin.yml) | `main-dc-addin` | `tenant/asint-apm-eiot-dc-addin` |
+| **AsInt Demo** | Core | [`deploy_asint_demo.yml`](.github/workflows/deploy_asint_demo.yml) | `main` | `tenant/asint-demo` |
+| | DC | [`deploy_asint_demo_dc.yml`](.github/workflows/deploy_asint_demo_dc.yml) | `main-dc` | `tenant/asint-demo-dc` |
+| | DC AddIn | [`deploy_asint_demo_dc_addin.yml`](.github/workflows/deploy_asint_demo_dc_addin.yml) | `main-dc-addin` | `tenant/asint-demo-dc-addin` |
+| **Baystar** | Core | [`deploy_baystar.yml`](.github/workflows/deploy_baystar.yml) | `main` | `tenant/baystar` |
+| | DC | [`deploy_baystar_dc.yml`](.github/workflows/deploy_baystar_dc.yml) | `main-dc` | `tenant/baystar-dc` |
+| | DC AddIn | [`deploy_baystar_dc_addin.yml`](.github/workflows/deploy_baystar_dc_addin.yml) | `main-dc-addin` | `tenant/baystar-dc-addin` |
+| **HSC Non-Prod** | Core | [`deploy_hsc_non_prod.yml`](.github/workflows/deploy_hsc_non_prod.yml) | `main` | `tenant/hemlock-non-prod` |
+| | DC | [`deploy_hsc_non_prod_dc.yml`](.github/workflows/deploy_hsc_non_prod_dc.yml) | `main-dc` | `tenant/hemlock-non-prod-dc` |
+| | DC AddIn | [`deploy_hsc_non_prod_dc_addin.yml`](.github/workflows/deploy_hsc_non_prod_dc_addin.yml) | `main-dc-addin` | `tenant/hemlock-non-prod-dc-addin` |
+| **HSC Prod** | Core | [`deploy_hsc_prod.yml`](.github/workflows/deploy_hsc_prod.yml) | `tenant/hemlock-non-prod` | `tenant/hemlock-prod` |
+| | DC | [`deploy_hsc_prod_dc.yml`](.github/workflows/deploy_hsc_prod_dc.yml) | `tenant/hemlock-non-prod-dc` | `tenant/hemlock-prod-dc` |
+| | DC AddIn | [`deploy_hsc_prod_dc_addin.yml`](.github/workflows/deploy_hsc_prod_dc_addin.yml) | `tenant/hemlock-non-prod-dc-addin` | `tenant/hemlock-prod-dc-addin` |
+| **Indorama QA 233** | Core | [`deploy_indorama_qa_233.yml`](.github/workflows/deploy_indorama_qa_233.yml) | `main` | `tenant/indorama-qa-233` |
+| | DC | [`deploy_indorama_qa_233_dc.yml`](.github/workflows/deploy_indorama_qa_233_dc.yml) | `main-dc` | `tenant/indorama-qa-233-dc` |
+| | DC AddIn | [`deploy_indorama_qa_233_dc_addin.yml`](.github/workflows/deploy_indorama_qa_233_dc_addin.yml) | `main-dc-addin` | `tenant/indorama-qa-233-dc-addin` |
+| **Indorama Prod 900** | Core | [`deploy_indorama_prod_900.yml`](.github/workflows/deploy_indorama_prod_900.yml) | `tenant/indorama-qa-233` | `tenant/indorama-prod-900` |
+| | DC | [`deploy_indorama_prod_900_dc.yml`](.github/workflows/deploy_indorama_prod_900_dc.yml) | `tenant/indorama-qa-233-dc` | `tenant/indorama-prod-900-dc` |
+| | DC AddIn | [`deploy_indorama_prod_900_dc_addin.yml`](.github/workflows/deploy_indorama_prod_900_dc_addin.yml) | `tenant/indorama-qa-233-dc-addin` | `tenant/indorama-prod-900-dc-addin` |
+| **Indorama QA 234** | Core | [`deploy_indorama_qa_234.yml`](.github/workflows/deploy_indorama_qa_234.yml) | `main` | `tenant/indorama-qa-234` |
+| | DC | [`deploy_indorama_qa_234_dc.yml`](.github/workflows/deploy_indorama_qa_234_dc.yml) | `main-dc` | `tenant/indorama-qa-234-dc` |
+| | DC AddIn | [`deploy_indorama_qa_234_dc_addin.yml`](.github/workflows/deploy_indorama_qa_234_dc_addin.yml) | `main-dc-addin` | `tenant/indorama-qa-234-dc-addin` |
+| **Indorama Prod 933** | Core | [`deploy_indorama_prod_933.yml`](.github/workflows/deploy_indorama_prod_933.yml) | `tenant/indorama-qa-234` | `tenant/indorama-prod-933` |
+| | DC | [`deploy_indorama_prod_933_dc.yml`](.github/workflows/deploy_indorama_prod_933_dc.yml) | `tenant/indorama-qa-234-dc` | `tenant/indorama-prod-933-dc` |
+| | DC AddIn | [`deploy_indorama_prod_933_dc_addin.yml`](.github/workflows/deploy_indorama_prod_933_dc_addin.yml) | `tenant/indorama-qa-234-dc-addin` | `tenant/indorama-prod-933-dc-addin` |
+| **IRC** | Core | [`deploy_irc.yml`](.github/workflows/deploy_irc.yml) | `main` | `tenant/asint-irc-temp` |
+| | DC | [`deploy_irc_dc.yml`](.github/workflows/deploy_irc_dc.yml) | `main-dc` | `tenant/irc-dc` |
+| | DC AddIn | [`deploy_irc_dc_addin.yml`](.github/workflows/deploy_irc_dc_addin.yml) | `main-dc-addin` | `tenant/irc-dc-addin` |
+| **ST Env** | Core | [`deploy_st_env.yml`](.github/workflows/deploy_st_env.yml) | `dev` | `st-env-for-contentfederation` |
+| | DC | [`deploy_st_env_dc.yml`](.github/workflows/deploy_st_env_dc.yml) | `dev` | `tenant/asint-st-env-dc` |
+| | DC AddIn | [`deploy_st_env_dc_addin.yml`](.github/workflows/deploy_st_env_dc_addin.yml) | `dev` | `tenant/asint-st-env-dc-addin` |
+| **VMOS** | Core | [`deploy_vmos.yml`](.github/workflows/deploy_vmos.yml) | `main` | `tenant/vmos-dev` |
+| | DC | [`deploy_vmos_dc.yml`](.github/workflows/deploy_vmos_dc.yml) | `main-dc` | `tenant/vmos-dc` |
+| | DC AddIn | [`deploy_vmos_dc_addin.yml`](.github/workflows/deploy_vmos_dc_addin.yml) | `main-dc-addin` | `tenant/vmos-dc-addin` |
 
 ---
 
@@ -373,5 +410,6 @@ flowchart TD
         Fin -->|"Deployment Success Card"| Notify
     end
 ```
+
 
 
