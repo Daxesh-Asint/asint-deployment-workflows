@@ -1,189 +1,300 @@
-# AsInt Deployment Automation — GitHub Actions Workflow Inventory & Optimization Analysis
+﻿# AsInt Deployment Automation — Workflows Guide
 
-**Author:** Daxesh Prajapati  
-**Target Reviewers:** Sharan N, Alisha Verma  
-**Scope:** Complete inventory of all custom deployment & automation workflows in `StillSomehowSane/asint_ais`.  
-
----
-
-## Executive Overview
-This document breaks down every custom GitHub Actions workflow powering the AsInt deployment pipeline. For each workflow, four key operational aspects are addressed:
-1. **What does each workflow do?** (Technical responsibility)
-2. **When is it triggered?** (Exact GitHub Actions trigger event)
-3. **Why do we have it?** (Underlying business/engineering purpose)
-4. **Can it be clubbed or removed?** (Feasibility assessment for consolidation)
+This document lists all deployment workflows in the repository. For each workflow, it explains:
+1. **What does it do?**
+2. **When is it triggered?** (Trigger code snippet)
+3. **Steps performed** (Simple sequence of actions)
 
 ---
 
-## Section 1: APM-02 Deployment Family (Workflows 1 to 6)
+## Section 1: APM-02 Deployment Workflows
 
-### 1. `apm02_1_create_and_wait.yml` (APM-02 Step 1: Create Snapshot & Countdown)
-* **What does it do?**
-  * Creates an isolated snapshot branch from `dev`.
-  * Sends an announcement to Microsoft Teams notifying developers that deployment has initiated.
-  * Initiates the countdown wait loop (default: 30 minutes) allowing developers to cherry-pick pending hotfixes before code freeze.
-  * Automatically proceeds to trigger Step 3 (finalize) once countdown expires, or immediately if bypassed via `@Jarvis deploy now`.
+### 1. [apm02_1_create_and_wait.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/apm02_1_create_and_wait.yml)
+* **What does it do?**  
+  Starts the APM-02 deployment by creating a snapshot branch from `dev`, alerting the team on Microsoft Teams, and running a 30-minute waiting countdown so developers can cherry-pick any last-minute commits before code freeze.
 * **When is it triggered?**
-  * Triggered via `repository_dispatch` with event type `trigger_apm02_deployment` (dispatched by GCP Jarvis Bot when someone types `@Jarvis share snapshot [minutes]`).
-* **Why do we have it (Business Reason)?**
-  * Protects production stability. It establishes an organized, predictable window for engineers to commit critical bug fixes without racing against an immediate deployment lock.
-* **Can it be clubbed or removed?**
-  * **Cannot be removed:** It is the core initiator of the entire APM-02 deployment pipeline.
-  * **Can it be optimized/clubbed?** **YES.** Currently, the 30-minute countdown runs as an active wait loop inside GitHub Actions. We can offload the 30-minute timer to GCP Cloud Tasks/Webhook so GitHub Actions is only triggered *after* the 30 minutes expire. This reduces workflow runtime from 30 minutes down to < 2 minutes.
+  ```yaml
+  on:
+    repository_dispatch:
+      types: [trigger_apm02_deployment]
+  ```
+* **Steps performed:**
+  1. Checks deployment guard conditions.
+  2. Creates and pushes the snapshot branch from `dev`.
+  3. Sends initial deployment announcement card to Microsoft Teams.
+  4. Runs countdown wait loop (default: 30 minutes).
+  5. Automatically triggers Step 3 (finalize) once the timer finishes.
 
 ---
 
-### 2. `apm02_2_extend_wait.yml` (APM-02 Step 2: Extend Snapshot Wait Window)
-* **What does it do?**
-  * Extends the running countdown timer on an active snapshot deployment if developers need extra time to complete testing or cherry-picks.
-  * Updates the state in Microsoft Teams.
+### 2. [apm02_2_extend_wait.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/apm02_2_extend_wait.yml)
+* **What does it do?**  
+  Extends the snapshot countdown timer if developers need more time to cherry-pick or test fixes.
 * **When is it triggered?**
-  * Triggered via `repository_dispatch` with event type `extend_apm02_wait` (dispatched when someone requests `@Jarvis extend wait [minutes]`).
-* **Why do we have it (Business Reason)?**
-  * Prevents premature deployment cut-offs when complex testing or unexpected bug resolution requires an extra 15–30 minutes without having to abort the entire deployment cycle.
-* **Can it be clubbed or removed?**
-  * **Keep as is:** It is an on-demand auxiliary trigger. If the 30-minute wait loop is offloaded to GCP Cloud Tasks in the future, this extension logic would naturally move into GCP as well.
+  ```yaml
+  on:
+    repository_dispatch:
+      types: [extend_apm02_wait]
+  ```
+* **Steps performed:**
+  1. Validates that a snapshot deployment is currently active.
+  2. Updates the countdown timer with the requested extra minutes.
+  3. Posts an updated status card to Microsoft Teams.
 
 ---
 
-### 3. `apm02_3_finalize_cycle.yml` (APM-02 Step 3: Finalize, Merge & Content Channel Refresh)
-* **What does it do?**
-  * Merges the validated snapshot branch into the designated tenant deployment branch (`tenant/asint-apm-02-*`).
-  * Triggers SAP Build Work Zone (BWZ) content channel refresh via headless Playwright automation (for APM-02).
-  * Sends deployment completion notifications and cleanup signals.
+### 3. [apm02_3_finalize_cycle.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/apm02_3_finalize_cycle.yml)
+* **What does it do?**  
+  Finalizes the deployment after SAP build completes. It merges the snapshot into the tenant branch, refreshes SAP Build Work Zone (Launchpad) content channels, and notifies the team.
 * **When is it triggered?**
-  * Triggered via `repository_dispatch` with event type `sap_cicd_finished` (dispatched once SAP CI/CD ANS deployment finishes).
-* **Why do we have it (Business Reason)?**
-  * Ensures that changes successfully deployed through SAP CI/CD are permanently recorded back into tenant branches and SAP Launchpad tiles are immediately refreshed for end-users.
-* **Can it be clubbed or removed?**
-  * **Cannot be removed:** Core finalization pipeline.
-  * **Optimization:** Notification steps can be combined directly into the main job to eliminate auxiliary sub-job dispatches.
+  ```yaml
+  on:
+    repository_dispatch:
+      types: [sap_cicd_finished]
+  ```
+* **Steps performed:**
+  1. Checks guard status and validates SAP build results.
+  2. Merges the snapshot branch into the tenant deployment branch.
+  3. Runs headless browser script to refresh SAP Build Work Zone content channel.
+  4. Sends final deployment success card to Microsoft Teams.
+  5. Deletes the temporary snapshot branch.
 
 ---
 
-### 4. `apm02_4_conflict_monitor.yml` (Base PR Conflict Monitor)
-* **What does it do?**
-  * Continuously evaluates open Pull Requests targeting base branches (`main`, `main-dc`, `main-dc-addin`) to verify whether incoming commits conflict with upstream base code.
-  * Dispatches an alert to Teams if base-level divergence occurs.
+### 4. [apm02_4_conflict_monitor.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/apm02_4_conflict_monitor.yml)
+* **What does it do?**  
+  Checks open Pull Requests targeting base branches (`main`, `main-dc`, `main-dc-addin`) to see if merge conflicts exist before deployment begins.
 * **When is it triggered?**
-  * Triggered on `pull_request` events (opened, synchronize, reopened) strictly targeting base branches.
-* **Why do we have it (Business Reason)?**
-  * Early warning system. Detects merge conflicts hours before scheduled production cut-offs, preventing deployment freezes during release windows.
-* **Can it be clubbed or removed?**
-  * **Can be clubbed:** Highly viable candidate to merge with `apm02_5_apm02_conflict_monitor.yml` into a single unified conflict-monitoring workflow using a branch matrix.
+  ```yaml
+  on:
+    pull_request:
+      types: [opened, synchronize, reopened]
+      branches:
+        - main
+        - main-dc
+        - main-dc-addin
+  ```
+* **Steps performed:**
+  1. Compares incoming PR branch with the base branch.
+  2. Detects any conflicting files.
+  3. Sends conflict alert to Microsoft Teams if merge conflicts are found.
 
 ---
 
-### 5. `apm02_5_apm02_conflict_monitor.yml` (Tenant Deployment Conflict Monitor)
-* **What does it do?**
-  * Evaluates open Pull Requests targeting tenant-specific deployment streams (`tenant/asint-apm-02-v2`, `tenant/asint-apm-02-dc`, `tenant/asint-apm-02-dc-addin`).
+### 5. [apm02_5_apm02_conflict_monitor.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/apm02_5_apm02_conflict_monitor.yml)
+* **What does it do?**  
+  Checks open Pull Requests targeting APM-02 tenant branches for merge conflicts.
 * **When is it triggered?**
-  * Triggered on `pull_request` events targeting tenant deployment branches.
-* **Why do we have it (Business Reason)?**
-  * Isolates tenant branch conflicts so that tenant-specific customizations or schema differences do not silently collide with base deployment PRs.
-* **Can it be clubbed or removed?**
-  * **Can be clubbed:** Can be consolidated with `apm02_4_conflict_monitor.yml` into one reusable conflict monitor.
+  ```yaml
+  on:
+    pull_request:
+      types: [opened, synchronize, reopened]
+      branches:
+        - "tenant/asint-apm-02-v2"
+        - "tenant/asint-apm-02-dc"
+        - "tenant/asint-apm-02-dc-addin"
+  ```
+* **Steps performed:**
+  1. Inspects PR mergeability against tenant deployment branches.
+  2. Flags any conflicting files.
+  3. Sends notification to Microsoft Teams if conflicts are detected.
 
 ---
 
-### 6. `apm02_6_recovery.yml` (Deployment Recovery & Rollback)
-* **What does it do?**
-  * Recovers the branch state if any deployment step crashes or fails validation midway.
-  * Restores git refs to their pre-snapshot baseline and cleans up orphaned deployment branches.
+### 6. [apm02_6_recovery.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/apm02_6_recovery.yml)
+* **What does it do?**  
+  Rolls back and recovers the repository if a deployment step fails midway, restoring branches to their clean baseline state.
 * **When is it triggered?**
-  * Triggered via `workflow_dispatch` (manual emergency recovery) or programmatically when fatal errors occur in finalize steps.
-* **Why do we have it (Business Reason)?**
-  * Disaster recovery safeguard. Guarantees that a failed deployment never leaves the repository in a corrupted or half-merged state.
-* **Can it be clubbed or removed?**
-  * **Keep separate:** Essential safety tool. Keeping recovery isolated ensures it can run independently even if other deployment workflows fail.
+  ```yaml
+  on:
+    workflow_dispatch:
+    repository_dispatch:
+      types: [recover_apm02_deployment]
+  ```
+* **Steps performed:**
+  1. Identifies the failed deployment run and snapshot branch.
+  2. Resets branch pointers back to the safe commit prior to snapshot.
+  3. Cleans up temporary deployment branches and unlocks pipeline guards.
+  4. Posts recovery notice to Microsoft Teams.
 
 ---
 
-## Section 2: Intelligent Auto-Merge & Governance (Workflows 7 to 9)
+## Section 2: Auto-Merge & Governance Workflows
 
-### 7. `_auto_merge.yml` (Direct Auto-Merge — Happy Path)
-* **What does it do?**
-  * Inspects automated deployment PRs (e.g. PR created from `dev` to `tenant/asint-ais-02`).
-  * If the PR is mergeable with **zero conflicts** and meets standard branch checks, it automatically merges the PR and triggers deployment.
+### 7. [_auto_merge.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/_auto_merge.yml)
+* **What does it do?**  
+  Direct Auto-Merge (Happy Path): Automatically merges deployment PRs (e.g. from `dev` to `tenant/asint-ais-02`) when there are no merge conflicts, starting deployment without any manual button clicks.
 * **When is it triggered?**
-  * Triggered automatically on `pull_request` creation or updates targeting deployment streams.
-* **Why do we have it (Business Reason)?**
-  * Eliminates human bottleneck. In 90% of routine deployments where code is clean, deployment proceeds immediately without waiting hours for manual clicks.
-* **Can it be clubbed or removed?**
-  * **Cannot be removed:** The cornerstone of autonomous deployment.
+  ```yaml
+  on:
+    pull_request:
+      types: [opened, synchronize]
+  ```
+* **Steps performed:**
+  1. Evaluates PR mergeability and checks for zero conflicts.
+  2. Verifies that all required automated checks have passed.
+  3. Automatically merges the PR into the target deployment branch.
+  4. Triggers the tenant deployment workflow.
 
 ---
 
-### 8. `auto_merge_conflict_resolver.yml` (Self-Healing Conflict Resolver)
-* **What does it do?**
-  * Pauses auto-merge if merge conflicts exist and posts exact conflict notifications to the engineering team.
-  * Listens for developer push events. As soon as a developer resolves the conflicts and pushes fixes, it detects the clean state, merges the PR, and resumes the deployment pipeline automatically.
+### 8. [auto_merge_conflict_resolver.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/auto_merge_conflict_resolver.yml)
+* **What does it do?**  
+  Self-Healing Conflict Resolver: When merge conflicts exist on a PR, it pauses and notifies the team. As soon as a developer resolves the conflicts and pushes fixes, this workflow automatically detects the clean PR, merges it, and starts deployment.
 * **When is it triggered?**
-  * Triggered on `pull_request` synchronize (push) events on PRs with previous conflict states.
-* **Why do we have it (Business Reason)?**
-  * Zero-touch resumption. Once developers resolve git conflicts, they do not need to call DevOps to manually restart pipelines—it self-heals and finishes deployment automatically.
-* **Can it be clubbed or removed?**
-  * **Can be clubbed:** Can be merged into `_auto_merge.yml` as a secondary conditional step rather than a standalone workflow file.
+  ```yaml
+  on:
+    pull_request:
+      types: [synchronize]
+  ```
+* **Steps performed:**
+  1. Checks if the newly pushed commit resolved all merge conflicts.
+  2. If clean, automatically performs the merge.
+  3. Triggers the deployment workflow with zero manual intervention.
 
 ---
 
-### 9. `auto_merge_approval_handler.yml` (Protected Branch Review & Governance)
-* **What does it do?**
-  * On protected branches requiring peer review, it automatically assigns senior developers as reviewers.
-  * Listens for review submissions: the moment an approval is logged, it instantly merges the PR and starts deployment.
+### 9. [auto_merge_approval_handler.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/auto_merge_approval_handler.yml)
+* **What does it do?**  
+  Protected Branch Review Handler: For protected branches where merge rules require review, this workflow auto-assigns senior reviewers. The moment an approval is submitted, it automatically merges the PR and starts deployment.
 * **When is it triggered?**
-  * Triggered on `pull_request_review` events (submitted, approved).
-* **Why do we have it (Business Reason)?**
-  * Enforces compliance and quality governance while eliminating manual merge delays once approval is given.
-* **Can it be clubbed or removed?**
-  * **Can be clubbed:** Could be consolidated with `_auto_merge.yml` under PR lifecycle event triggers (`pull_request` + `pull_request_review`).
+  ```yaml
+  on:
+    pull_request_review:
+      types: [submitted]
+  ```
+* **Steps performed:**
+  1. Checks if the submitted review is an `APPROVED` state.
+  2. Confirms all branch protection requirements are met.
+  3. Automatically merges the PR into the protected branch.
+  4. Kicks off the deployment.
 
 ---
 
-## Section 3: Notification, Webhooks & Auxiliary Helpers (Workflows 10 to 12)
+## Section 3: Helper & Integration Workflows
 
-### 10. `_apm02_notify.yml` (Microsoft Teams Adaptive Card Dispatcher)
-* **What does it do?**
-  * Formats and posts structured Microsoft Teams Adaptive Cards (Snapshot Created, Countdown Reminders, Deployment Succeeded, Conflicts Detected).
+### 10. [_apm02_notify.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/_apm02_notify.yml)
+* **What does it do?**  
+  Formats and posts structured Microsoft Teams Adaptive Cards for deployment updates (Snapshot Created, Reminders, Merge Success, Conflicts).
 * **When is it triggered?**
-  * Called via `workflow_call` or `repository_dispatch` by parent deployment workflows.
-* **Why do we have it (Business Reason)?**
-  * Centralizes Teams notification formatting so UI styles and webhook URLs are maintained in one place.
-* **Can it be clubbed or removed?**
-  * **Optimization:** Instead of launching a separate workflow/runner for notifications, notification scripts can be run as inline composite steps inside the primary workflows, saving runner concurrency.
+  ```yaml
+  on:
+    workflow_call:
+      inputs: ...
+    repository_dispatch:
+      types: [apm02_notify]
+  ```
+* **Steps performed:**
+  1. Parses incoming notification payload (title, status, environment).
+  2. Constructs Microsoft Teams Adaptive Card JSON.
+  3. Sends card via webhook to Microsoft Teams channel.
 
 ---
 
-### 11. `sap_cicd_notifier.yml` (SAP CI/CD Webhook Listener)
-* **What does it do?**
-  * Receives webhook payload from SAP CI/CD (ANS - Alert Notification Service) upon build completion and verifies payload authenticity before triggering finalization.
+### 11. [sap_cicd_notifier.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/sap_cicd_notifier.yml)
+* **What does it do?**  
+  Receives build completion webhook alerts from SAP CI/CD and triggers the finalize deployment workflow.
 * **When is it triggered?**
-  * Triggered via `repository_dispatch` from SAP CI/CD incoming webhooks.
-* **Why do we have it (Business Reason)?**
-  * Bridges external SAP Cloud Foundry build pipelines back into GitHub Actions.
-* **Can it be clubbed or removed?**
-  * **Keep as is:** Essential external webhook ingress point.
+  ```yaml
+  on:
+    repository_dispatch:
+      types: [sap_cicd_alert]
+  ```
+* **Steps performed:**
+  1. Validates SAP CI/CD webhook event payload.
+  2. Dispatches `sap_cicd_finished` event to trigger `apm02_3_finalize_cycle.yml`.
 
 ---
 
-### 12. `_cf_app_control.yml` (Cloud Foundry Application Lifecycle Helper)
-* **What does it do?**
-  * Handles start, stop, and restart operations for SAP Cloud Foundry approuters/services during database migrations or maintenance.
+### 12. [_cf_app_control.yml](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/_cf_app_control.yml)
+* **What does it do?**  
+  Starts, stops, or restarts SAP Cloud Foundry approuters/services during database binding and deployments.
 * **When is it triggered?**
-  * Called via `workflow_call` by deployment finalization workflows.
-* **Why do we have it (Business Reason)?**
-  * Prevents end-user traffic collisions while deployment updates are binding to Cloud Foundry.
-* **Can it be clubbed or removed?**
-  * **Keep as is:** Excellent example of a modular, reusable sub-workflow.
+  ```yaml
+  on:
+    workflow_call:
+      inputs:
+        action: ...
+        app_name: ...
+  ```
+* **Steps performed:**
+  1. Logs into Cloud Foundry using deployment credentials.
+  2. Executes target action (`stop`, `start`, or `restart`) on the specified app.
+  3. Confirms application health state.
 
 ---
 
-## Executive Optimization Summary for Sharan & Alisha
+## Section 4: Tenant Deployment Caller Workflows (43 Workflows)
 
-| Recommendation | Actions to Combine / Optimize | Direct Benefit |
-|---|---|---|
-| **Optimization 1: Eliminate 30m Runner Wait** | Offload countdown in `apm02_1_create_and_wait.yml` to GCP Cloud Tasks | Reduces workflow runtime from 30 minutes to **under 2 minutes**; completely frees runner. |
-| **Optimization 2: Consolidate Conflict Monitors** | Merge `apm02_4_conflict_monitor.yml` + `apm02_5_apm02_conflict_monitor.yml` | Reduces workflow maintenance from 2 files to 1 parameterized workflow. |
-| **Optimization 3: Inline Teams Notifications** | Embed `_apm02_notify.yml` directly into main jobs | Eliminates unnecessary runner worker handoffs and speeds up notification delivery. |
-| **Optimization 4: Unified Auto-Merge Pipeline** | Merge `_auto_merge.yml`, `auto_merge_conflict_resolver.yml`, and `auto_merge_approval_handler.yml` | Single end-to-end PR lifecycle controller; cuts total workflow count by ~25%. |
+These workflows trigger deployments for each tenant environment. Each tenant has dedicated callers for **Core**, **Data Collector (DC)**, and **DC-AddIn**:
 
+* **What do they do?**  
+  Each workflow targets a specific tenant branch (e.g. `tenant/asint-apm-01`, `tenant/asint-ais-02`), checks out code, and initiates the tenant deployment pipeline.
+* **When are they triggered?**
+  ```yaml
+  on:
+    repository_dispatch:
+      types: [deploy_<tenant_name>]
+    workflow_dispatch:
+  ```
+* **Steps performed:**
+  1. Checks out repository branch for the specific tenant.
+  2. Sets up environment variables and tenant configuration.
+  3. Executes the deployment package.
+  4. Sends status result to Microsoft Teams.
+
+### List of Tenant Caller Files:
+* **AIS 02:** [`deploy_ais02_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_ais02_dc.yml), [`deploy_ais02_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_ais02_dc_addin.yml), [`merge_dev_to_tenant_ais02.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/merge_dev_to_tenant_ais02.yml)
+* **APM 01:** [`deploy_apm01.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_apm01.yml), [`deploy_apm01_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_apm01_dc.yml), [`deploy_apm01_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_apm01_dc_addin.yml)
+* **APM EIOT:** [`deploy_apm_eiot.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_apm_eiot.yml), [`deploy_apm_eiot_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_apm_eiot_dc.yml), [`deploy_apm_eiot_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_apm_eiot_dc_addin.yml)
+* **AsInt Demo:** [`deploy_asint_demo.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_asint_demo.yml), [`deploy_asint_demo_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_asint_demo_dc.yml), [`deploy_asint_demo_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_asint_demo_dc_addin.yml)
+* **Baystar:** [`deploy_baystar.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_baystar.yml), [`deploy_baystar_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_baystar_dc.yml), [`deploy_baystar_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_baystar_dc_addin.yml)
+* **HSC Non-Prod & Prod:** [`deploy_hsc_non_prod.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_hsc_non_prod.yml), [`deploy_hsc_non_prod_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_hsc_non_prod_dc.yml), [`deploy_hsc_non_prod_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_hsc_non_prod_dc_addin.yml), [`deploy_hsc_prod.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_hsc_prod.yml), [`deploy_hsc_prod_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_hsc_prod_dc.yml), [`deploy_hsc_prod_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_hsc_prod_dc_addin.yml)
+* **Indorama Prod (900 & 933):** [`deploy_indorama_prod_900.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_prod_900.yml), [`deploy_indorama_prod_900_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_prod_900_dc.yml), [`deploy_indorama_prod_900_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_prod_900_dc_addin.yml), [`deploy_indorama_prod_933.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_prod_933.yml), [`deploy_indorama_prod_933_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_prod_933_dc.yml), [`deploy_indorama_prod_933_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_prod_933_dc_addin.yml)
+* **Indorama QA (233 & 234):** [`deploy_indorama_qa_233.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_qa_233.yml), [`deploy_indorama_qa_233_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_qa_233_dc.yml), [`deploy_indorama_qa_233_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_qa_233_dc_addin.yml), [`deploy_indorama_qa_234.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_qa_234.yml), [`deploy_indorama_qa_234_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_qa_234_dc.yml), [`deploy_indorama_qa_234_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_indorama_qa_234_dc_addin.yml)
+* **IRC:** [`deploy_irc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_irc.yml), [`deploy_irc_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_irc_dc.yml), [`deploy_irc_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_irc_dc_addin.yml)
+* **ST Env:** [`deploy_st_env.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_st_env.yml), [`deploy_st_env_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_st_env_dc.yml), [`deploy_st_env_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_st_env_dc_addin.yml)
+* **VMOS:** [`deploy_vmos.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_vmos.yml), [`deploy_vmos_dc.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_vmos_dc.yml), [`deploy_vmos_dc_addin.yml`](https://github.com/Daxesh-Asint/asint-deployment-workflows/blob/main/.github/workflows/deploy_vmos_dc_addin.yml)
+
+---
+
+## 🔗 How Workflows Connect With Each Other (Architecture Flow)
+
+```mermaid
+flowchart TD
+    subgraph Trigger["1. Deployment Request"]
+        A["ChatOps: @Jarvis Command in Teams"]
+    end
+
+    subgraph Phase1["2. Snapshot & Wait"]
+        A -->|"trigger_apm02_deployment"| B["apm02_1_create_and_wait.yml"]
+        B -->|"Creates Snapshot"| B1["Snapshot Branch (dev snapshot)"]
+        B -->|"Wait Loop (30m)"| B2["Cherry-Pick Window for Devs"]
+        C["apm02_2_extend_wait.yml"] -.->|"Optional: Extend Wait"| B2
+    end
+
+    subgraph Phase2["3. Pre-Deploy Conflict Check"]
+        D["apm02_4_conflict_monitor.yml"] & E["apm02_5_apm02_conflict_monitor.yml"]
+        D & E -->|"Alert on Conflicts"| N["_apm02_notify.yml (Teams Alert)"]
+    end
+
+    subgraph Phase3["4. Auto-Merge Engine"]
+        F["_auto_merge.yml (Direct Merge)"]
+        G["auto_merge_conflict_resolver.yml (Resume on Fix)"]
+        H["auto_merge_approval_handler.yml (Review Approved)"]
+        F & G & H -->|"Clean Merge"| T["Tenant Branch (e.g. tenant/asint-ais-02)"]
+    end
+
+    subgraph Phase4["5. SAP Build & Finalize"]
+        B2 -->|"Timer Expired / Deploy Now"| SAP["SAP CI/CD Build (Cloud Foundry)"]
+        SAP -->|"sap_cicd_finished"| I["apm02_3_finalize_cycle.yml"]
+        I -->|"Merge to Tenant"| T
+        I -->|"Refresh BWZ"| BWZ["SAP Launchpad Content Channel"]
+        I -->|"Send Success Card"| N
+        I -->|"Clean Up"| Del["Delete Snapshot Branch"]
+    end
+
+    subgraph Phase5["6. Tenant Callers"]
+        T -->|"Triggers"| TC["deploy_<tenant>.yml (AIS02, APM01, EIOT, Baystar, etc.)"]
+    end
+```
