@@ -194,12 +194,6 @@ This document lists all deployment workflows in the repository. For each workflo
         - "apm-eiot-temp-copy"
         - "st-env-for-contentfederation"
       types: [synchronize, closed]
-    workflow_dispatch:
-      inputs:
-        pr_number:
-          description: "Pull Request Number to handle"
-          required: true
-          default: "1013"
   ```
 * **Steps performed:**
   1. Checks if the newly pushed commit resolved all merge conflicts.
